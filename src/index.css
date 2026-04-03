@@ -727,3 +727,17 @@ button{cursor:pointer;border:none;background:none;-webkit-tap-highlight-color:tr
 .tax-table-total{display:grid;grid-template-columns:3fr 2fr 3fr 3fr;padding:10px 4px;border-top:2px solid rgba(255,255,255,.1);font-size:13px;font-weight:700;color:#f1f5f9;margin-top:4px}
 .tax-table-total span:not(:first-child){text-align:right}
 .tax-table-total span:last-child{color:#ef4444}
+
+/* ─── KPI Month Selection ─── */
+.kpi-section{display:flex;flex-direction:column;gap:8px}
+.kpi-month-header{display:flex;align-items:center;justify-content:space-between;padding:0 2px}
+.kpi-month-name{font-size:15px;font-weight:700;color:#f1f5f9}
+.kpi-month-actions{display:flex;align-items:center;gap:6px}
+.kpi-month-items{display:flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:#f59e0b;padding:4px 8px;border-radius:8px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.2)}
+.kpi-month-reset{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;background:rgba(255,255,255,.06);color:#64748b}
+.kpi-month-reset:active,.kpi-month-items:active{opacity:.7}
+
+/* ─── Month bar selected state ─── */
+.month-bar-item.selected .month-bar-fill{background:linear-gradient(to top,#f59e0b,#f97316)}
+.month-bar-item.selected .month-bar-label{color:#f59e0b;font-weight:700}
+.month-bar-item.selected .month-bar-count{color:#f59e0b}

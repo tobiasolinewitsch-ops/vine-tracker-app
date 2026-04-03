@@ -384,8 +384,24 @@ export default function App() {
 
 // ─── Dashboard ───
 function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick,onReviewClick}) {
+  const [selectedMonth, setSelectedMonth] = useState(null) // index 0-11
   const maxETV = Math.max(...monthlyData.map(m=>m.etv),1)
   const activeMonths = monthlyData.filter(m=>m.items.length>0)
+
+  const sel = selectedMonth !== null ? monthlyData[selectedMonth] : null
+  const kpi = sel ? {
+    etv: sel.etv,
+    wertansatz: sel.wertansatz,
+    steuer: sel.wertansatz * settings.steuersatz,
+    verkauf: sel.items.reduce((s,i)=>s+(parseFloat(i.verkaufspreis)||0),0),
+    label: sel.name,
+  } : {
+    etv: totals.etv,
+    wertansatz: totals.wertansatz,
+    steuer: totals.steuer,
+    verkauf: totals.verkauf,
+    label: null,
+  }
 
   return (
     <div className="view-stack">
@@ -420,23 +436,39 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
       )}
 
       {/* KPI Cards */}
-      <div className="kpi-grid">
-        <div className="kpi-card">
-          <span className="kpi-label">Summe ETV</span>
-          <span className="kpi-value kpi-amber">{fmt(totals.etv)}</span>
-        </div>
-        <div className="kpi-card">
-          <span className="kpi-label">Wertansatz</span>
-          <span className="kpi-value kpi-purple">{fmt(totals.wertansatz)}</span>
-        </div>
-        <div className="kpi-card kpi-highlight">
-          <span className="kpi-label">Steuerlast</span>
-          <span className="kpi-value kpi-red">{fmt(totals.steuer)}</span>
-          <span className="kpi-sub">{(settings.steuersatz*100).toFixed(0)}% Steuersatz</span>
-        </div>
-        <div className="kpi-card">
-          <span className="kpi-label">Verkäufe</span>
-          <span className="kpi-value kpi-green">{fmt(totals.verkauf)}</span>
+      <div className="kpi-section">
+        {kpi.label && (
+          <div className="kpi-month-header">
+            <span className="kpi-month-name">{kpi.label}</span>
+            <div className="kpi-month-actions">
+              <button className="kpi-month-items" onClick={()=>onMonthClick(selectedMonth+1)}>
+                Artikel ansehen
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+              </button>
+              <button className="kpi-month-reset" onClick={()=>setSelectedMonth(null)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="kpi-grid">
+          <div className="kpi-card">
+            <span className="kpi-label">Summe ETV</span>
+            <span className="kpi-value kpi-amber">{fmt(kpi.etv)}</span>
+          </div>
+          <div className="kpi-card">
+            <span className="kpi-label">Wertansatz</span>
+            <span className="kpi-value kpi-purple">{fmt(kpi.wertansatz)}</span>
+          </div>
+          <div className="kpi-card kpi-highlight">
+            <span className="kpi-label">Steuerlast</span>
+            <span className="kpi-value kpi-red">{fmt(kpi.steuer)}</span>
+            <span className="kpi-sub">{(settings.steuersatz*100).toFixed(0)}% Steuersatz</span>
+          </div>
+          <div className="kpi-card">
+            <span className="kpi-label">Verkäufe</span>
+            <span className="kpi-value kpi-green">{fmt(kpi.verkauf)}</span>
+          </div>
         </div>
       </div>
 
@@ -463,8 +495,11 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
         <h3 className="card-title">Monatsübersicht</h3>
         <div className="month-chart">
           {monthlyData.map((m,i)=>(
-            <button key={i} className={`month-bar-item ${m.items.length?'has-data':''}`}
-              onClick={()=>m.items.length>0&&onMonthClick(i+1)}>
+            <button key={i} className={`month-bar-item ${m.items.length?'has-data':''} ${selectedMonth===i?'selected':''}`}
+              onClick={()=>{
+                if (!m.items.length) return
+                setSelectedMonth(prev => prev===i ? null : i)
+              }}>
               <div className="month-bar-track">
                 <div className="month-bar-fill" style={{height:`${(m.etv/maxETV)*100}%`}} />
               </div>
