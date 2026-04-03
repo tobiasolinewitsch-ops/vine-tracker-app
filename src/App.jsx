@@ -166,7 +166,7 @@ export default function App() {
         })
       }
 
-      if (!upserts.length) { showToast('Keine gültigen Daten gefunden.','error'); setUploading(false); return }
+      if (!upserts.length) { showToast('Keine gültigen Daten gefunden. Bitte ITIM-Report prüfen (XLSX/CSV mit Order Number & ASIN Spalten).','error'); setUploading(false); return }
 
       // Token-Check: jedes Item kostet 1 Token (Admin hat unbegrenzt)
       if (profile?.role !== 'admin') {
@@ -191,12 +191,12 @@ export default function App() {
         if (updatedProfile) setProfile(updatedProfile)
       }
 
-      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, user_id: uid })
+      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, aktualisierte_artikel: 0, user_id: uid })
 
       setUploadResult({ total: upserts.length })
       showToast(`${upserts.length} Artikel importiert!`)
       loadData()
-    } catch(err) { showToast('Upload fehlgeschlagen: '+err.message,'error') }
+    } catch(err) { showToast('Upload fehlgeschlagen: '+(err.message || err.details || JSON.stringify(err)),'error'); console.error('Upload error:', err) }
     setUploading(false)
     e.target.value = ''
   }
