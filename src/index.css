@@ -198,7 +198,12 @@ button{cursor:pointer;border:none;background:none;-webkit-tap-highlight-color:tr
   border:1px solid color-mix(in srgb, var(--status-color) 15%, transparent);
   min-width:56px;
   flex:1;
+  cursor:pointer;
+  font-family:inherit;
+  transition:background 0.15s;
 }
+.status-pill:not(:disabled):active{background:color-mix(in srgb, var(--status-color) 20%, transparent)}
+.status-pill:disabled{cursor:default;opacity:.5}
 .status-pill-icon{font-size:14px;color:var(--status-color);font-weight:700}
 .status-pill-count{font-size:20px;font-weight:800;color:var(--status-color)}
 .status-pill-label{font-size:10px;color:var(--status-color);opacity:.7;font-weight:500}

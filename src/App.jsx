@@ -67,6 +67,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reviewMode, setReviewMode] = useState(false)
   const [reviewIndex, setReviewIndex] = useState(0)
+  const [reviewedIds, setReviewedIds] = useState(new Set())
 
   const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
 
@@ -192,6 +193,7 @@ export default function App() {
       if (error) throw error
       // Update local state immediately
       setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag } : i))
+      setReviewedIds(prev => new Set([...prev, item.id]))
     } catch(e) { showToast('Fehler: '+e.message,'error') }
   }
 
@@ -237,8 +239,8 @@ export default function App() {
 
   // Unreviewed items for swipe mode (aktiv with default abschlag, no notes, no manual changes)
   const unreviewedItems = useMemo(() =>
-    items.filter(i => i.status === 'aktiv' && !i.notizen && !i.verkaufspreis)
-  ,[items])
+    items.filter(i => i.status === 'aktiv' && !i.notizen && !i.verkaufspreis && !reviewedIds.has(i.id))
+  ,[items, reviewedIds])
 
   if (loading) return (
     <div className="loading-screen">
@@ -285,6 +287,7 @@ export default function App() {
             settings={settings}
             onMonthClick={m=>{setSelectedMonth(m);setView('items')}}
             onSellableClick={()=>{setSellableFilter(true);setView('items')}}
+            onStatusClick={key=>{setStatusFilter(key);setView('items')}}
           />
         )}
         {view==='items' && (
@@ -346,7 +349,7 @@ export default function App() {
 }
 
 // ─── Dashboard ───
-function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick}) {
+function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick}) {
   const maxETV = Math.max(...monthlyData.map(m=>m.etv),1)
 
   return (
@@ -393,11 +396,12 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick}) {
           {Object.entries(STATUS_LABELS).map(([key,label])=>{
             const count = totals[key] || 0
             return (
-              <div key={key} className="status-pill" style={{'--status-color':STATUS_COLORS[key]}}>
+              <button key={key} className="status-pill" style={{'--status-color':STATUS_COLORS[key]}}
+                onClick={()=>count>0&&onStatusClick(key)} disabled={count===0}>
                 <span className="status-pill-icon">{STATUS_ICONS[key]}</span>
                 <span className="status-pill-count">{count}</span>
                 <span className="status-pill-label">{label}</span>
-              </div>
+              </button>
             )
           })}
         </div>
