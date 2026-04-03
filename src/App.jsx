@@ -85,25 +85,10 @@ export default function App() {
     } catch(e) { return null }
   }, [])
 
-  useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      const u = session?.user ?? null
-      setUser(u)
-      try { if (u) await loadProfile(u.id) } catch(e) {}
-      setAuthLoading(false)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      const u = session?.user ?? null
-      setUser(u)
-      if (u) await loadProfile(u.id)
-      else setProfile(null)
-    })
-    return () => subscription.unsubscribe()
-  }, [loadProfile])
-
   const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
 
   const loadData = useCallback(async () => {
+    setLoading(true)
     try {
       const [{ data: itemsData }, { data: settingsData }] = await Promise.all([
         supabase.from('items').select('*').order('versanddatum',{ascending:false,nullsFirst:false}).order('id',{ascending:false}).limit(2000),
@@ -111,11 +96,25 @@ export default function App() {
       ])
       setItems(itemsData || [])
       if (settingsData?.length) setSettings(settingsData[0])
-    } catch(e) { showToast('Fehler beim Laden: '+e.message,'error') }
+    } catch(e) { console.error('loadData error:', e) }
     setLoading(false)
   },[])
 
-  useEffect(()=>{ loadData() },[loadData])
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      const u = session?.user ?? null
+      setUser(u)
+      try { if (u) { await loadProfile(u.id); await loadData() } } catch(e) {}
+      setAuthLoading(false)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const u = session?.user ?? null
+      setUser(u)
+      if (u) { await loadProfile(u.id); loadData() }
+      else { setProfile(null); setItems([]) }
+    })
+    return () => subscription.unsubscribe()
+  }, [loadProfile, loadData])
 
   // Upload handler
   const handleUpload = async (e) => {
