@@ -104,13 +104,13 @@ export default function App() {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       const u = session?.user ?? null
       setUser(u)
-      try { if (u) { await loadProfile(u.id); await loadData() } } catch(e) {}
+      try { if (u) await Promise.all([loadProfile(u.id), loadData()]) } catch(e) {}
       setAuthLoading(false)
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       const u = session?.user ?? null
       setUser(u)
-      if (u) { await loadProfile(u.id); loadData() }
+      if (u) Promise.all([loadProfile(u.id), loadData()])
       else { setProfile(null); setItems([]) }
     })
     return () => subscription.unsubscribe()
