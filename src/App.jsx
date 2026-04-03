@@ -168,16 +168,11 @@ export default function App() {
 
       if (!upserts.length) { showToast('Keine gültigen Daten gefunden.','error'); setUploading(false); return }
 
-      // Free-Tier-Limit: max 5 neue Artikel pro Monat
-      if (profile?.subscription === 'free') {
-        const { data: countData } = await supabase.rpc('count_my_monthly_items')
-        const existing = countData || 0
-        if (existing >= 5) {
-          showToast('Free-Limit erreicht: max. 5 Artikel/Monat. Upgrade auf Premium für unbegrenzten Zugang.', 'error')
-          setUploading(false); return
-        }
-        if (existing + upserts.length > 5) {
-          showToast(`Nur noch ${5 - existing} Artikel diesen Monat möglich (Free-Limit). Bitte Datei kürzen oder Premium holen.`, 'error')
+      // Token-Check: jedes Item kostet 1 Token (Admin hat unbegrenzt)
+      if (profile?.role !== 'admin') {
+        const available = profile?.tokens || 0
+        if (available < upserts.length) {
+          showToast(`Nicht genug Token! Du hast ${available} Token, brauchst aber ${upserts.length}.`, 'error')
           setUploading(false); return
         }
       }
@@ -187,6 +182,14 @@ export default function App() {
       const upsertsWithUser = upserts.map(u => ({ ...u, user_id: uid }))
       const { error } = await supabase.from('items').upsert(upsertsWithUser, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
       if (error) throw error
+
+      // Token abziehen
+      if (profile?.role !== 'admin') {
+        await supabase.rpc('spend_tokens', { amount: upserts.length })
+        // Profil neu laden damit Token-Stand aktuell ist
+        const { data: updatedProfile } = await supabase.from('profiles').select('*').eq('id', uid).single()
+        if (updatedProfile) setProfile(updatedProfile)
+      }
 
       await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, user_id: uid })
 
@@ -879,13 +882,15 @@ function SwipeReview({items,index,setIndex,settings,onSave,onEditFull,showToast}
 function UploadView({onUpload,uploading,result,unreviewedCount,onStartReview,profile}) {
   return (
     <div className="view-stack">
-      {profile?.subscription === 'free' && (
+      {profile?.role !== 'admin' && (
         <div className="free-limit-banner">
           <div>
-            <strong>Free-Plan</strong>
-            <span>Max. 5 neue Artikel pro Monat</span>
+            <strong>Token-Guthaben</strong>
+            <span>Jeder importierte Artikel kostet 1 Token</span>
           </div>
-          <span className="free-limit-badge">Upgrade: 9,99 €/Monat</span>
+          <span className="free-limit-badge" style={{background: (profile?.tokens||0) > 0 ? '#22c55e' : '#ef4444'}}>
+            {profile?.tokens || 0} Token
+          </span>
         </div>
       )}
       <div className="card">
@@ -1223,6 +1228,7 @@ function ProfileModal({user, onClose, showToast}) {
 function AdminPanel({showToast}) {
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
+  const [tokenInputs, setTokenInputs] = useState({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1243,26 +1249,28 @@ function AdminPanel({showToast}) {
     else { showToast(u.is_blocked ? 'Nutzer entsperrt' : 'Nutzer gesperrt'); load() }
   }
 
-  const toggleSubscription = async (u) => {
-    const next = u.subscription === 'free' ? 'premium' : 'free'
+  const addTokens = async (u) => {
+    const amount = parseInt(tokenInputs[u.id] || '0', 10)
+    if (!amount || amount <= 0) { showToast('Bitte eine positive Zahl eingeben', 'error'); return }
     const { error } = await supabase.rpc('admin_update_user', {
       target_id: u.id,
-      new_subscription: next,
+      add_tokens: amount,
     })
     if (error) showToast('Fehler: ' + error.message, 'error')
-    else { showToast(`Abo auf ${next === 'premium' ? 'Premium (9,99 €)' : 'Free'} geändert`); load() }
+    else {
+      showToast(`${amount} Token für ${u.full_name || u.email} hinzugefügt`)
+      setTokenInputs(prev => ({ ...prev, [u.id]: '' }))
+      load()
+    }
   }
 
   return (
     <div className="view-stack">
       <div className="card">
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16}}>
           <h3 className="card-title" style={{marginBottom:0}}>Nutzerverwaltung</h3>
           <span style={{fontSize:12,color:'#64748b'}}>{users.length} Nutzer</span>
         </div>
-        <p className="card-desc" style={{fontSize:12,color:'#64748b',marginBottom:16}}>
-          Free = 5 Artikel/Monat · Premium = 9,99 €/Monat unbegrenzt
-        </p>
 
         {loading ? (
           <div style={{textAlign:'center',padding:32,color:'#64748b'}}>Lädt...</div>
@@ -1276,18 +1284,24 @@ function AdminPanel({showToast}) {
               </div>
               <div className="admin-user-email">{u.email}</div>
               <div className="admin-user-meta">
-                {u.item_count} Artikel · Seit {new Date(u.created_at).toLocaleDateString('de-DE')}
+                {u.item_count} Artikel · {u.role === 'admin' ? '∞ Token' : `${u.tokens} Token`} · Seit {new Date(u.created_at).toLocaleDateString('de-DE')}
               </div>
             </div>
             <div className="admin-user-actions">
-              <button
-                className={`admin-sub-btn ${u.subscription === 'premium' ? 'premium' : 'free'}`}
-                onClick={() => toggleSubscription(u)}
-                disabled={u.role === 'admin'}
-                title={u.role === 'admin' ? 'Admin ist immer Premium' : ''}
-              >
-                {u.subscription === 'premium' ? '★ Premium' : 'Free'}
-              </button>
+              {u.role !== 'admin' && (
+                <div className="admin-token-row">
+                  <input
+                    className="admin-token-input"
+                    type="number"
+                    min="1"
+                    placeholder="Anzahl"
+                    value={tokenInputs[u.id] || ''}
+                    onChange={e => setTokenInputs(prev => ({ ...prev, [u.id]: e.target.value }))}
+                    onKeyDown={e => e.key === 'Enter' && addTokens(u)}
+                  />
+                  <button className="admin-token-btn" onClick={() => addTokens(u)}>+ Token</button>
+                </div>
+              )}
               <button
                 className={`admin-block-btn ${u.is_blocked ? 'blocked' : ''}`}
                 onClick={() => toggleBlock(u)}
@@ -1299,26 +1313,6 @@ function AdminPanel({showToast}) {
             </div>
           </div>
         ))}
-      </div>
-
-      <div className="card">
-        <h3 className="card-title">Abo-Modell</h3>
-        <div className="plan-grid">
-          <div className="plan-card">
-            <div className="plan-name">Free</div>
-            <div className="plan-price">0 €</div>
-            <div className="plan-feature">✓ Registrierung</div>
-            <div className="plan-feature">✓ 5 Artikel / Monat</div>
-            <div className="plan-feature muted">✕ Unbegrenzte Artikel</div>
-          </div>
-          <div className="plan-card premium">
-            <div className="plan-name">Premium</div>
-            <div className="plan-price">9,99 €<span>/Monat</span></div>
-            <div className="plan-feature">✓ Registrierung</div>
-            <div className="plan-feature">✓ 5 Artikel / Monat</div>
-            <div className="plan-feature">✓ Unbegrenzte Artikel</div>
-          </div>
-        </div>
       </div>
     </div>
   )
