@@ -126,47 +126,38 @@ export default function App() {
       const buf = await file.arrayBuffer()
       const wb = XLSX.read(buf, { type:'array', cellDates:true })
       const ws = wb.Sheets[wb.SheetNames[0]]
-      const raw = XLSX.utils.sheet_to_json(ws, { defval:'' })
+      const raw = XLSX.utils.sheet_to_json(ws, { defval:'', raw: false })
 
-      let rows = raw
-      if (rows.length && !rows[0]['Order Number'] && !rows[0]['ASIN']) {
-        const headerRow = rows.findIndex(r => Object.values(r).some(v => String(v).includes('Order Number') || String(v).includes('ASIN')))
-        if (headerRow >= 0) {
-          const headerVals = Object.values(rows[headerRow])
-          const dataRows = rows.slice(headerRow+1)
-          rows = dataRows.map(r => {
-            const obj = {}
-            Object.values(r).forEach((v,i) => { if (headerVals[i]) obj[String(headerVals[i]).trim()] = v })
-            return obj
-          })
-        }
+      if (!raw.length) { showToast('Datei ist leer oder unlesbar.','error'); setUploading(false); return }
+
+      showToast('KI analysiert die Datei...', 'success')
+
+      // Claude API zur Auswertung
+      const response = await fetch('/api/parse-excel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: raw }),
+      })
+      const result = await response.json()
+      if (!response.ok || result.error) {
+        showToast('KI-Fehler: ' + (result.error || 'Unbekannt'), 'error')
+        setUploading(false); return
       }
 
-      const upserts = []
-      for (const row of rows) {
-        const bestellnummer = String(row['Order Number'] || row['Bestellnummer'] || '').trim()
-        const asin = String(row['ASIN'] || '').trim()
-        if (!bestellnummer || !asin || bestellnummer === 'Order Number') continue
+      const upserts = (result.items || []).map(item => ({
+        bestellnummer: String(item.bestellnummer || '').trim(),
+        asin: String(item.asin || '').trim(),
+        produkt: String(item.produkt || 'Unbekannt').trim(),
+        order_type: String(item.order_type || 'ORDER').trim(),
+        bestelldatum: item.bestelldatum || null,
+        versanddatum: item.versanddatum || null,
+        storno_datum: item.storno_datum || null,
+        etv: parseFloat(item.etv) || 0,
+        abschlag_verwendet: settings.wertminderung,
+        status: item.storno_datum ? 'storniert' : 'aktiv',
+      })).filter(i => i.bestellnummer && i.asin)
 
-        const etv = parseFloat(String(row['Consideration Amount'] || row['ETV / Consideration (€)'] || '0').replace(',','.')) || 0
-        const orderType = String(row['Order Type'] || 'ORDER').trim()
-        const bestelldatum = parseITIMDate(row['Order Date'] || row['Bestelldatum'])
-        const versanddatum = parseITIMDate(row['Shipped Date'] || row['Versanddatum'])
-        const stornoDatum = parseITIMDate(row['Cancelled Date'] || row['Storno-Datum'])
-
-        upserts.push({
-          bestellnummer, asin,
-          produkt: String(row['Product Name'] || row['Produkt'] || 'Unbekannt').trim(),
-          order_type: orderType,
-          bestelldatum, versanddatum,
-          storno_datum: stornoDatum || null,
-          etv,
-          abschlag_verwendet: settings.wertminderung,
-          status: stornoDatum ? 'storniert' : 'aktiv',
-        })
-      }
-
-      if (!upserts.length) { showToast('Keine gültigen Daten gefunden. Bitte ITIM-Report prüfen (XLSX/CSV mit Order Number & ASIN Spalten).','error'); setUploading(false); return }
+      if (!upserts.length) { showToast('KI konnte keine Artikel erkennen. Bitte Format prüfen.','error'); setUploading(false); return }
 
       // Token-Check: jedes Item kostet 1 Token (Admin hat unbegrenzt)
       if (profile?.role !== 'admin') {
