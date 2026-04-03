@@ -71,7 +71,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reviewMode, setReviewMode] = useState(false)
   const [reviewIndex, setReviewIndex] = useState(0)
-  const [reviewedIds, setReviewedIds] = useState(new Set())
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -203,24 +202,26 @@ export default function App() {
       const { error } = await supabase.from('items').update({
         status,
         abschlag_verwendet: abschlag,
+        bewertet: true,
         updated_at: new Date().toISOString(),
       }).eq('id', item.id)
       if (error) throw error
       // Update local state immediately
-      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag } : i))
-      setReviewedIds(prev => new Set([...prev, item.id]))
+      const newWertansatz = (parseFloat(item.etv)||0) * (1 - abschlag)
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag, bewertet: true, wertansatz: newWertansatz } : i))
     } catch(e) { showToast('Fehler: '+e.message,'error') }
   }
 
   // Computed data
   const monthlyData = useMemo(() => {
-    const data = MONTHS_FULL.map((name,i) => ({ name, short: MONTHS[i], month:i+1, items:[], etv:0, wertansatz:0 }))
+    const data = MONTHS_FULL.map((name,i) => ({ name, short: MONTHS[i], month:i+1, items:[], etv:0, wertansatz:0, bewertetCount:0 }))
     items.forEach(item => {
       const m = item.monat
       if (m>=1 && m<=12) {
         data[m-1].items.push(item)
         data[m-1].etv += parseFloat(item.etv)||0
         data[m-1].wertansatz += parseFloat(item.wertansatz)||0
+        if (item.bewertet) data[m-1].bewertetCount++
       }
     })
     return data
@@ -238,6 +239,7 @@ export default function App() {
     storniert: items.filter(i=>i.status==='storniert').length,
     verschenkt: items.filter(i=>i.status==='verschenkt').length,
     sellable: items.filter(isSellable).length,
+    bewertet: items.filter(i=>i.bewertet).length,
   }),[items,settings.steuersatz])
 
   const filteredItems = useMemo(() => {
@@ -252,10 +254,10 @@ export default function App() {
     return list
   },[items,selectedMonth,statusFilter,sellableFilter,search])
 
-  // Unreviewed items for swipe mode (aktiv with default abschlag, no notes, no manual changes)
+  // Unreviewed items for swipe mode — persistent via DB field `bewertet`
   const unreviewedItems = useMemo(() =>
-    items.filter(i => i.status === 'aktiv' && !i.notizen && !i.verkaufspreis && !reviewedIds.has(i.id))
-  ,[items, reviewedIds])
+    items.filter(i => i.status === 'aktiv' && !i.bewertet)
+  ,[items])
 
   if (authLoading) return (
     <div className="loading-screen">
@@ -318,6 +320,7 @@ export default function App() {
             onMonthClick={m=>{setSelectedMonth(m);setView('items')}}
             onSellableClick={()=>{setSellableFilter(true);setView('items')}}
             onStatusClick={key=>{setStatusFilter(key);setView('items')}}
+            onReviewClick={()=>setView('review')}
           />
         )}
         {view==='items' && (
@@ -380,11 +383,28 @@ export default function App() {
 }
 
 // ─── Dashboard ───
-function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick}) {
+function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick,onReviewClick}) {
   const maxETV = Math.max(...monthlyData.map(m=>m.etv),1)
+  const activeMonths = monthlyData.filter(m=>m.items.length>0)
 
   return (
     <div className="view-stack">
+      {/* Bewertungs-Fortschritt */}
+      {totals.count > 0 && (
+        <button className="review-progress-banner" onClick={onReviewClick}>
+          <div className="rpb-left">
+            <span className="rpb-title">Bewertungsfortschritt</span>
+            <span className="rpb-sub">{totals.bewertet} von {totals.count} Artikeln bewertet</span>
+          </div>
+          <div className="rpb-right">
+            <div className="rpb-bar-track">
+              <div className="rpb-bar-fill" style={{width:`${(totals.bewertet/totals.count)*100}%`}}/>
+            </div>
+            <span className="rpb-pct">{Math.round((totals.bewertet/totals.count)*100)}%</span>
+          </div>
+        </button>
+      )}
+
       {/* Sellable Alert */}
       {totals.sellable > 0 && (
         <button className="sellable-alert" onClick={onSellableClick}>
@@ -454,6 +474,41 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
           ))}
         </div>
       </div>
+
+      {/* Monatliche Steuerlast */}
+      {activeMonths.length > 0 && (
+        <div className="card">
+          <h3 className="card-title">Monatliche Steuerlast</h3>
+          <p className="card-desc" style={{fontSize:12,color:'#64748b',marginBottom:12}}>
+            Erwartete Steuer nach Abschreibung · {(settings.steuersatz*100).toFixed(0)}% Steuersatz
+          </p>
+          <div className="tax-table">
+            <div className="tax-table-head">
+              <span>Monat</span>
+              <span>Bewertet</span>
+              <span>Wertansatz</span>
+              <span>Steuer</span>
+            </div>
+            {activeMonths.map((m,i)=>{
+              const steuer = m.wertansatz * settings.steuersatz
+              return (
+                <button key={i} className="tax-table-row" onClick={()=>onMonthClick(m.month)}>
+                  <span className="tax-month">{m.short}</span>
+                  <span className="tax-bewertet">{m.bewertetCount}/{m.items.length}</span>
+                  <span className="tax-wert">{fmt(m.wertansatz)}</span>
+                  <span className="tax-steuer">{fmt(steuer)}</span>
+                </button>
+              )
+            })}
+            <div className="tax-table-total">
+              <span>Gesamt</span>
+              <span>{totals.bewertet}/{totals.count}</span>
+              <span>{fmt(totals.wertansatz)}</span>
+              <span>{fmt(totals.steuer)}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Parameters */}
       <div className="card">
