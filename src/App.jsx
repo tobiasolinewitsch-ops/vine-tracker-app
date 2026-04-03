@@ -1,0 +1,936 @@
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { supabase } from './supabase'
+import * as XLSX from 'xlsx'
+
+// ─── Constants ───
+const MONTHS = ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']
+const MONTHS_FULL = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember']
+const STATUS_COLORS = { aktiv:'#22c55e', defekt:'#ef4444', verkauft:'#3b82f6', storniert:'#94a3b8', verschenkt:'#a855f7' }
+const STATUS_LABELS = { aktiv:'Aktiv', defekt:'Defekt', verkauft:'Verkauft', storniert:'Storniert', verschenkt:'Verschenkt' }
+const STATUS_ICONS = { aktiv:'✓', defekt:'✕', verkauft:'€', storniert:'⊘', verschenkt:'♡' }
+const ABSCHLAG_OPTIONS = [
+  { value: 0, label: '0%', desc: 'Kein Abschlag' },
+  { value: 0.3, label: '30%', desc: 'Gering' },
+  { value: 0.5, label: '50%', desc: 'Standard' },
+  { value: 0.7, label: '70%', desc: 'Hoch' },
+  { value: 1.0, label: '100%', desc: 'Komplett' },
+]
+
+const fmt = n => new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}).format(n||0)
+const fmtDate = d => d ? new Date(d).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'}) : '–'
+const fmtDateShort = d => d ? new Date(d).toLocaleDateString('de-DE',{day:'2-digit',month:'short'}) : '–'
+
+function isSellable(item) {
+  if (!item.versanddatum || item.status !== 'aktiv') return false
+  const ship = new Date(item.versanddatum)
+  const threshold = new Date()
+  threshold.setMonth(threshold.getMonth() - 6)
+  return ship <= threshold
+}
+
+function daysUntilSellable(item) {
+  if (!item.versanddatum) return null
+  const ship = new Date(item.versanddatum)
+  const sellDate = new Date(ship)
+  sellDate.setMonth(sellDate.getMonth() + 6)
+  const now = new Date()
+  const diff = Math.ceil((sellDate - now) / (1000 * 60 * 60 * 24))
+  return diff > 0 ? diff : 0
+}
+
+function parseITIMDate(d) {
+  if (!d) return null
+  if (typeof d === 'number') {
+    const date = new Date((d - 25569) * 86400 * 1000)
+    return date.toISOString().split('T')[0]
+  }
+  const s = String(d).trim()
+  if (s.includes('/')) { const [day,month,year] = s.split('/'); return `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}` }
+  if (s.match(/^\d{4}-\d{2}-\d{2}/)) return s.slice(0,10)
+  return null
+}
+
+// ─── Main App ───
+export default function App() {
+  const [items, setItems] = useState([])
+  const [settings, setSettings] = useState({ steuersatz: 0.35, wertminderung: 0.5, gebuehrenrate: 0 })
+  const [view, setView] = useState('dashboard')
+  const [selectedMonth, setSelectedMonth] = useState(null)
+  const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('alle')
+  const [sellableFilter, setSellableFilter] = useState(false)
+  const [editItem, setEditItem] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [uploadResult, setUploadResult] = useState(null)
+  const [toast, setToast] = useState(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [reviewMode, setReviewMode] = useState(false)
+  const [reviewIndex, setReviewIndex] = useState(0)
+
+  const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
+
+  const loadData = useCallback(async () => {
+    try {
+      const [{ data: itemsData }, { data: settingsData }] = await Promise.all([
+        supabase.from('items').select('*').order('versanddatum',{ascending:false,nullsFirst:false}).order('id',{ascending:false}).limit(2000),
+        supabase.from('settings').select('*').eq('id',1),
+      ])
+      setItems(itemsData || [])
+      if (settingsData?.length) setSettings(settingsData[0])
+    } catch(e) { showToast('Fehler beim Laden: '+e.message,'error') }
+    setLoading(false)
+  },[])
+
+  useEffect(()=>{ loadData() },[loadData])
+
+  // Upload handler
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    setUploadResult(null)
+    try {
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(buf, { type:'array', cellDates:true })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const raw = XLSX.utils.sheet_to_json(ws, { defval:'' })
+
+      let rows = raw
+      if (rows.length && !rows[0]['Order Number'] && !rows[0]['ASIN']) {
+        const headerRow = rows.findIndex(r => Object.values(r).some(v => String(v).includes('Order Number') || String(v).includes('ASIN')))
+        if (headerRow >= 0) {
+          const headerVals = Object.values(rows[headerRow])
+          const dataRows = rows.slice(headerRow+1)
+          rows = dataRows.map(r => {
+            const obj = {}
+            Object.values(r).forEach((v,i) => { if (headerVals[i]) obj[String(headerVals[i]).trim()] = v })
+            return obj
+          })
+        }
+      }
+
+      const upserts = []
+      for (const row of rows) {
+        const bestellnummer = String(row['Order Number'] || row['Bestellnummer'] || '').trim()
+        const asin = String(row['ASIN'] || '').trim()
+        if (!bestellnummer || !asin || bestellnummer === 'Order Number') continue
+
+        const etv = parseFloat(String(row['Consideration Amount'] || row['ETV / Consideration (€)'] || '0').replace(',','.')) || 0
+        const orderType = String(row['Order Type'] || 'ORDER').trim()
+        const bestelldatum = parseITIMDate(row['Order Date'] || row['Bestelldatum'])
+        const versanddatum = parseITIMDate(row['Shipped Date'] || row['Versanddatum'])
+        const stornoDatum = parseITIMDate(row['Cancelled Date'] || row['Storno-Datum'])
+
+        upserts.push({
+          bestellnummer, asin,
+          produkt: String(row['Product Name'] || row['Produkt'] || 'Unbekannt').trim(),
+          order_type: orderType,
+          bestelldatum, versanddatum,
+          storno_datum: stornoDatum || null,
+          etv,
+          abschlag_verwendet: settings.wertminderung,
+          status: stornoDatum ? 'storniert' : 'aktiv',
+        })
+      }
+
+      if (!upserts.length) { showToast('Keine gültigen Daten gefunden.','error'); setUploading(false); return }
+
+      const { error } = await supabase.from('items').upsert(upserts, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
+      if (error) throw error
+
+      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length })
+
+      setUploadResult({ total: upserts.length })
+      showToast(`${upserts.length} Artikel importiert!`)
+      loadData()
+    } catch(err) { showToast('Upload fehlgeschlagen: '+err.message,'error') }
+    setUploading(false)
+    e.target.value = ''
+  }
+
+  const saveItem = async (item) => {
+    try {
+      const { error } = await supabase.from('items').update({
+        verkaufspreis: item.verkaufspreis,
+        gebuehren_versand: item.gebuehren_versand,
+        verkauft_am: item.verkauft_am || null,
+        notizen: item.notizen,
+        status: item.status,
+        abschlag_optional: item.abschlag_optional,
+        abschlag_verwendet: item.abschlag_verwendet,
+        updated_at: new Date().toISOString(),
+      }).eq('id', item.id)
+      if (error) throw error
+      showToast('Gespeichert!')
+      setEditItem(null)
+      loadData()
+    } catch(e) { showToast('Fehler: '+e.message,'error') }
+  }
+
+  const saveSettings = async () => {
+    try {
+      const { error } = await supabase.from('settings').update({
+        steuersatz: settings.steuersatz,
+        wertminderung: settings.wertminderung,
+        gebuehrenrate: settings.gebuehrenrate,
+      }).eq('id',1)
+      if (error) throw error
+      showToast('Einstellungen gespeichert!')
+      setSettingsOpen(false)
+    } catch(e) { showToast('Fehler: '+e.message,'error') }
+  }
+
+  // Quick save for swipe review
+  const quickSave = async (item, status, abschlag) => {
+    try {
+      const { error } = await supabase.from('items').update({
+        status,
+        abschlag_verwendet: abschlag,
+        updated_at: new Date().toISOString(),
+      }).eq('id', item.id)
+      if (error) throw error
+      // Update local state immediately
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag } : i))
+    } catch(e) { showToast('Fehler: '+e.message,'error') }
+  }
+
+  // Computed data
+  const monthlyData = useMemo(() => {
+    const data = MONTHS_FULL.map((name,i) => ({ name, short: MONTHS[i], month:i+1, items:[], etv:0, wertansatz:0 }))
+    items.forEach(item => {
+      const m = item.monat
+      if (m>=1 && m<=12) {
+        data[m-1].items.push(item)
+        data[m-1].etv += parseFloat(item.etv)||0
+        data[m-1].wertansatz += parseFloat(item.wertansatz)||0
+      }
+    })
+    return data
+  },[items])
+
+  const totals = useMemo(() => ({
+    etv: items.reduce((s,i)=>s+(parseFloat(i.etv)||0),0),
+    wertansatz: items.reduce((s,i)=>s+(parseFloat(i.wertansatz)||0),0),
+    steuer: items.reduce((s,i)=>s+((parseFloat(i.wertansatz)||0)*settings.steuersatz),0),
+    verkauf: items.reduce((s,i)=>s+(parseFloat(i.verkaufspreis)||0),0),
+    count: items.length,
+    aktiv: items.filter(i=>i.status==='aktiv').length,
+    defekt: items.filter(i=>i.status==='defekt').length,
+    verkauft: items.filter(i=>i.status==='verkauft').length,
+    storniert: items.filter(i=>i.status==='storniert').length,
+    verschenkt: items.filter(i=>i.status==='verschenkt').length,
+    sellable: items.filter(isSellable).length,
+  }),[items,settings.steuersatz])
+
+  const filteredItems = useMemo(() => {
+    let list = items
+    if (selectedMonth!==null) list = list.filter(i=>i.monat===selectedMonth)
+    if (statusFilter!=='alle') list = list.filter(i=>i.status===statusFilter)
+    if (sellableFilter) list = list.filter(isSellable)
+    if (search) {
+      const q = search.toLowerCase()
+      list = list.filter(i=>i.produkt?.toLowerCase().includes(q)||i.asin?.toLowerCase().includes(q)||i.bestellnummer?.toLowerCase().includes(q)||i.notizen?.toLowerCase().includes(q))
+    }
+    return list
+  },[items,selectedMonth,statusFilter,sellableFilter,search])
+
+  // Unreviewed items for swipe mode (aktiv with default abschlag, no notes, no manual changes)
+  const unreviewedItems = useMemo(() =>
+    items.filter(i => i.status === 'aktiv' && !i.notizen && !i.verkaufspreis)
+  ,[items])
+
+  if (loading) return (
+    <div className="loading-screen">
+      <div className="loading-vine">
+        <div className="loading-logo">V</div>
+        <div className="loading-spinner" />
+      </div>
+      <p className="loading-text">Vine Tracker lädt...</p>
+    </div>
+  )
+
+  return (
+    <div className="app">
+      {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
+
+      {/* Header */}
+      <header className="header">
+        <div className="header-left">
+          <div className="logo">V</div>
+          <div>
+            <h1 className="title">Vine Tracker</h1>
+            <p className="subtitle">{totals.count} Artikel</p>
+          </div>
+        </div>
+        <div className="header-right">
+          {totals.sellable > 0 && (
+            <button className="sellable-badge" onClick={()=>{setSellableFilter(true);setView('items')}}>
+              <span className="sellable-dot" />
+              {totals.sellable} verkaufbar
+            </button>
+          )}
+          <button className="header-btn" onClick={()=>setSettingsOpen(true)} aria-label="Einstellungen">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="main">
+        {view==='dashboard' && (
+          <Dashboard
+            totals={totals}
+            monthlyData={monthlyData}
+            settings={settings}
+            onMonthClick={m=>{setSelectedMonth(m);setView('items')}}
+            onSellableClick={()=>{setSellableFilter(true);setView('items')}}
+          />
+        )}
+        {view==='items' && (
+          <ItemList
+            items={filteredItems}
+            search={search} setSearch={setSearch}
+            statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+            selectedMonth={selectedMonth} setSelectedMonth={setSelectedMonth}
+            sellableFilter={sellableFilter} setSellableFilter={setSellableFilter}
+            onEdit={i=>setEditItem({...i})}
+          />
+        )}
+        {view==='review' && (
+          <SwipeReview
+            items={unreviewedItems}
+            index={reviewIndex}
+            setIndex={setReviewIndex}
+            settings={settings}
+            onSave={quickSave}
+            onEditFull={i=>{setEditItem({...i})}}
+            showToast={showToast}
+          />
+        )}
+        {view==='upload' && (
+          <UploadView
+            onUpload={handleUpload}
+            uploading={uploading}
+            result={uploadResult}
+            unreviewedCount={unreviewedItems.length}
+            onStartReview={()=>{setReviewIndex(0);setView('review')}}
+          />
+        )}
+      </main>
+
+      {/* Bottom Navigation */}
+      <nav className="bottom-nav">
+        {[
+          {id:'dashboard',label:'Übersicht',icon:<IconDashboard/>},
+          {id:'items',label:'Artikel',icon:<IconList/>},
+          {id:'review',label:'Bewerten',icon:<IconSwipe/>, badge: unreviewedItems.length||null},
+          {id:'upload',label:'Import',icon:<IconUpload/>},
+        ].map(tab=>(
+          <button key={tab.id} className={`nav-tab ${view===tab.id?'active':''}`}
+            onClick={()=>{setView(tab.id);if(tab.id!=='items'){setSelectedMonth(null);setSellableFilter(false)}}}>
+            <div className="nav-tab-icon">
+              {tab.icon}
+              {tab.badge && <span className="nav-badge">{tab.badge > 99 ? '99+' : tab.badge}</span>}
+            </div>
+            <span className="nav-tab-label">{tab.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {/* Modals */}
+      {editItem && <EditModal item={editItem} settings={settings} onSave={saveItem} onClose={()=>setEditItem(null)} />}
+      {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={()=>setSettingsOpen(false)} />}
+    </div>
+  )
+}
+
+// ─── Dashboard ───
+function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick}) {
+  const maxETV = Math.max(...monthlyData.map(m=>m.etv),1)
+
+  return (
+    <div className="view-stack">
+      {/* Sellable Alert */}
+      {totals.sellable > 0 && (
+        <button className="sellable-alert" onClick={onSellableClick}>
+          <div className="sellable-alert-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M8 12l3 3 5-5"/></svg>
+          </div>
+          <div className="sellable-alert-text">
+            <strong>{totals.sellable} Artikel verkaufbar</strong>
+            <span>6-Monats-Frist abgelaufen</span>
+          </div>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      )}
+
+      {/* KPI Cards */}
+      <div className="kpi-grid">
+        <div className="kpi-card">
+          <span className="kpi-label">Summe ETV</span>
+          <span className="kpi-value kpi-amber">{fmt(totals.etv)}</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-label">Wertansatz</span>
+          <span className="kpi-value kpi-purple">{fmt(totals.wertansatz)}</span>
+        </div>
+        <div className="kpi-card kpi-highlight">
+          <span className="kpi-label">Steuerlast</span>
+          <span className="kpi-value kpi-red">{fmt(totals.steuer)}</span>
+          <span className="kpi-sub">{(settings.steuersatz*100).toFixed(0)}% Steuersatz</span>
+        </div>
+        <div className="kpi-card">
+          <span className="kpi-label">Verkäufe</span>
+          <span className="kpi-value kpi-green">{fmt(totals.verkauf)}</span>
+        </div>
+      </div>
+
+      {/* Status Overview */}
+      <div className="card">
+        <h3 className="card-title">Status</h3>
+        <div className="status-pills">
+          {Object.entries(STATUS_LABELS).map(([key,label])=>{
+            const count = totals[key] || 0
+            return (
+              <div key={key} className="status-pill" style={{'--status-color':STATUS_COLORS[key]}}>
+                <span className="status-pill-icon">{STATUS_ICONS[key]}</span>
+                <span className="status-pill-count">{count}</span>
+                <span className="status-pill-label">{label}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Monthly Chart */}
+      <div className="card">
+        <h3 className="card-title">Monatsübersicht</h3>
+        <div className="month-chart">
+          {monthlyData.map((m,i)=>(
+            <button key={i} className={`month-bar-item ${m.items.length?'has-data':''}`}
+              onClick={()=>m.items.length>0&&onMonthClick(i+1)}>
+              <div className="month-bar-track">
+                <div className="month-bar-fill" style={{height:`${(m.etv/maxETV)*100}%`}} />
+              </div>
+              <span className="month-bar-label">{m.short}</span>
+              {m.items.length > 0 && <span className="month-bar-count">{m.items.length}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Parameters */}
+      <div className="card">
+        <h3 className="card-title">Parameter</h3>
+        <div className="param-row">
+          <div className="param-item">
+            <span className="param-val" style={{color:'#f59e0b'}}>{(settings.steuersatz*100).toFixed(0)}%</span>
+            <span className="param-label">Steuersatz</span>
+          </div>
+          <div className="param-divider" />
+          <div className="param-item">
+            <span className="param-val" style={{color:'#8b5cf6'}}>{(settings.wertminderung*100).toFixed(0)}%</span>
+            <span className="param-label">Wertminderung</span>
+          </div>
+          <div className="param-divider" />
+          <div className="param-item">
+            <span className="param-val" style={{color:'#3b82f6'}}>{(settings.gebuehrenrate*100).toFixed(0)}%</span>
+            <span className="param-label">Gebührenrate</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Item List ───
+function ItemList({items,search,setSearch,statusFilter,setStatusFilter,selectedMonth,setSelectedMonth,sellableFilter,setSellableFilter,onEdit}) {
+  return (
+    <div className="view-stack">
+      {/* Search */}
+      <div className="search-bar">
+        <svg className="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input className="search-input" placeholder="Suchen..." value={search} onChange={e=>setSearch(e.target.value)} />
+        {search && <button className="search-clear" onClick={()=>setSearch('')}>✕</button>}
+      </div>
+
+      {/* Filters */}
+      <div className="filter-row">
+        {selectedMonth && (
+          <button className="filter-chip active-month" onClick={()=>setSelectedMonth(null)}>
+            ✕ {MONTHS_FULL[selectedMonth-1]}
+          </button>
+        )}
+        {sellableFilter && (
+          <button className="filter-chip active-sellable" onClick={()=>setSellableFilter(false)}>
+            ✕ Verkaufbar
+          </button>
+        )}
+        <div className="filter-scroll">
+          {['alle','aktiv','defekt','verkauft','storniert','verschenkt'].map(s=>(
+            <button key={s}
+              className={`filter-chip ${statusFilter===s?'active':''}`}
+              style={statusFilter===s?{'--chip-color':STATUS_COLORS[s]||'#64748b'}:{}}
+              onClick={()=>setStatusFilter(s)}>
+              {s==='alle'?'Alle':STATUS_LABELS[s]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Count */}
+      <p className="list-count">{items.length} Artikel</p>
+
+      {/* Items */}
+      <div className="item-list">
+        {items.map(item => {
+          const sellable = isSellable(item)
+          const days = daysUntilSellable(item)
+          return (
+            <button key={item.id} className={`item-card ${sellable ? 'item-sellable' : ''}`} onClick={()=>onEdit(item)}>
+              <div className="item-row">
+                <div className="item-info">
+                  <p className="item-name">{item.produkt}</p>
+                  <p className="item-meta">
+                    {item.asin}
+                    {item.versanddatum && <> · {fmtDateShort(item.versanddatum)}</>}
+                  </p>
+                </div>
+                <div className="item-values">
+                  <p className="item-etv">{fmt(item.etv)}</p>
+                  <p className="item-wa">{fmt(item.wertansatz)}</p>
+                </div>
+              </div>
+              <div className="item-tags">
+                <span className="tag" style={{'--tag-color':STATUS_COLORS[item.status]}}>
+                  {STATUS_ICONS[item.status]} {STATUS_LABELS[item.status]||item.status}
+                </span>
+                {sellable && (
+                  <span className="tag tag-sellable">Verkaufbar</span>
+                )}
+                {!sellable && days > 0 && days <= 30 && item.status === 'aktiv' && (
+                  <span className="tag tag-soon">Noch {days} Tage</span>
+                )}
+                {parseFloat(item.abschlag_verwendet)===1 && (
+                  <span className="tag tag-warn">100%</span>
+                )}
+                {item.notizen && <span className="item-note-icon" title={item.notizen}>📝</span>}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+
+      {!items.length && (
+        <div className="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="1.5"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+          <p>Keine Artikel gefunden</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Swipe Review ───
+function SwipeReview({items,index,setIndex,settings,onSave,onEditFull,showToast}) {
+  const [currentStatus, setCurrentStatus] = useState('aktiv')
+  const [currentAbschlag, setCurrentAbschlag] = useState(0.5)
+  const [saving, setSaving] = useState(false)
+  const [direction, setDirection] = useState(null)
+  const cardRef = useRef(null)
+  const touchStartX = useRef(0)
+  const touchCurrentX = useRef(0)
+
+  const item = items[index]
+
+  useEffect(() => {
+    if (item) {
+      setCurrentStatus(item.status || 'aktiv')
+      setCurrentAbschlag(parseFloat(item.abschlag_verwendet) || settings.wertminderung)
+    }
+  }, [item, settings.wertminderung])
+
+  const handleNext = async () => {
+    if (!item || saving) return
+    setSaving(true)
+    await onSave(item, currentStatus, currentAbschlag)
+    showToast(`${currentStatus === 'defekt' ? 'Defekt' : 'Gespeichert'} – ${ABSCHLAG_OPTIONS.find(o=>o.value===currentAbschlag)?.label || currentAbschlag*100+'%'} Abschlag`)
+    setDirection('left')
+    setTimeout(() => {
+      setDirection(null)
+      setIndex(i => Math.min(i + 1, items.length))
+      setSaving(false)
+    }, 250)
+  }
+
+  const handleSkip = () => {
+    setDirection('right')
+    setTimeout(() => {
+      setDirection(null)
+      setIndex(i => Math.min(i + 1, items.length))
+    }, 250)
+  }
+
+  // Touch handlers for swipe
+  const onTouchStart = (e) => {
+    touchStartX.current = e.touches[0].clientX
+    touchCurrentX.current = e.touches[0].clientX
+  }
+  const onTouchMove = (e) => {
+    touchCurrentX.current = e.touches[0].clientX
+    const diff = touchCurrentX.current - touchStartX.current
+    if (cardRef.current) {
+      cardRef.current.style.transform = `translateX(${diff * 0.4}px) rotate(${diff * 0.02}deg)`
+      cardRef.current.style.transition = 'none'
+    }
+  }
+  const onTouchEnd = () => {
+    const diff = touchCurrentX.current - touchStartX.current
+    if (cardRef.current) {
+      cardRef.current.style.transition = 'transform 0.3s ease'
+      cardRef.current.style.transform = ''
+    }
+    if (diff < -80) handleNext()
+    else if (diff > 80) handleSkip()
+  }
+
+  if (!items.length) return (
+    <div className="review-empty">
+      <div className="review-empty-icon">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="1.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+      </div>
+      <h2>Alles bewertet!</h2>
+      <p>Keine unbewerteten Artikel vorhanden.</p>
+    </div>
+  )
+
+  if (index >= items.length) return (
+    <div className="review-empty">
+      <div className="review-empty-icon">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="1.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+      </div>
+      <h2>Fertig!</h2>
+      <p>{items.length} Artikel bewertet.</p>
+      <button className="btn-primary" onClick={()=>setIndex(0)} style={{marginTop:16}}>Nochmal durchgehen</button>
+    </div>
+  )
+
+  const wertansatz = (parseFloat(item.etv)||0) * (1 - currentAbschlag)
+
+  return (
+    <div className="review-view">
+      {/* Progress */}
+      <div className="review-progress">
+        <div className="review-progress-bar">
+          <div className="review-progress-fill" style={{width:`${((index+1)/items.length)*100}%`}} />
+        </div>
+        <span className="review-progress-text">{index+1} / {items.length}</span>
+      </div>
+
+      {/* Card */}
+      <div
+        ref={cardRef}
+        className={`review-card ${direction ? 'review-card-'+direction : ''}`}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      >
+        <div className="review-card-header">
+          <span className="review-etv">{fmt(item.etv)}</span>
+          {isSellable(item) && <span className="tag tag-sellable">Verkaufbar</span>}
+        </div>
+
+        <h3 className="review-product">{item.produkt}</h3>
+        <p className="review-meta">
+          {item.asin} · {fmtDate(item.versanddatum)}
+        </p>
+
+        {/* Status Selection */}
+        <div className="review-section">
+          <label className="review-label">Status</label>
+          <div className="review-status-grid">
+            {[
+              {key:'aktiv',label:'Benutzbar',icon:'✓',color:'#22c55e'},
+              {key:'defekt',label:'Defekt',icon:'✕',color:'#ef4444'},
+              {key:'verschenkt',label:'Verschenkt',icon:'♡',color:'#a855f7'},
+              {key:'storniert',label:'Storniert',icon:'⊘',color:'#94a3b8'},
+            ].map(s=>(
+              <button key={s.key}
+                className={`review-status-btn ${currentStatus===s.key?'active':''}`}
+                style={{'--btn-color':s.color}}
+                onClick={()=>setCurrentStatus(s.key)}>
+                <span className="review-status-icon">{s.icon}</span>
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Abschlag Selection */}
+        <div className="review-section">
+          <label className="review-label">
+            Abschreibung
+            <span className="review-label-value">{fmt(wertansatz)} Wertansatz</span>
+          </label>
+          <div className="abschlag-options">
+            {ABSCHLAG_OPTIONS.map(opt=>(
+              <button key={opt.value}
+                className={`abschlag-btn ${currentAbschlag===opt.value?'active':''}`}
+                onClick={()=>setCurrentAbschlag(opt.value)}>
+                <span className="abschlag-pct">{opt.label}</span>
+                <span className="abschlag-desc">{opt.desc}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Expand button */}
+        <button className="review-expand" onClick={()=>onEditFull(item)}>
+          Alle Details bearbeiten
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+
+      {/* Action Buttons */}
+      <div className="review-actions">
+        <button className="review-action-skip" onClick={handleSkip}>
+          Überspringen
+        </button>
+        <button className="review-action-save" onClick={handleNext} disabled={saving}>
+          {saving ? 'Speichere...' : 'Speichern & Weiter'}
+        </button>
+      </div>
+
+      <p className="review-hint">Wische nach links zum Speichern, nach rechts zum Überspringen</p>
+    </div>
+  )
+}
+
+// ─── Upload View ───
+function UploadView({onUpload,uploading,result,unreviewedCount,onStartReview}) {
+  return (
+    <div className="view-stack">
+      <div className="card">
+        <h3 className="card-title">Vine Report importieren</h3>
+        <p className="card-desc">
+          Lade deine Amazon Vine ITIM-Report Datei hoch. Bestehende Artikel werden aktualisiert, neue hinzugefügt.
+        </p>
+        <label className="upload-zone">
+          <input type="file" accept=".csv,.xlsx,.xls" onChange={onUpload} style={{display:'none'}} disabled={uploading} />
+          {uploading ? (
+            <div className="upload-loading">
+              <div className="loading-spinner" />
+              <p>Importiere...</p>
+            </div>
+          ) : (
+            <div className="upload-content">
+              <div className="upload-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </div>
+              <p className="upload-title">Datei auswählen</p>
+              <p className="upload-sub">XLSX oder CSV (ITIM-Report)</p>
+            </div>
+          )}
+        </label>
+        {result && (
+          <div className="upload-success">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+            {result.total} Artikel importiert
+          </div>
+        )}
+      </div>
+
+      {/* Review CTA */}
+      {unreviewedCount > 0 && (
+        <button className="review-cta" onClick={onStartReview}>
+          <div className="review-cta-content">
+            <div className="review-cta-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </div>
+            <div>
+              <strong>{unreviewedCount} Artikel bewerten</strong>
+              <span>Jetzt im Swipe-Modus durchgehen</span>
+            </div>
+          </div>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      )}
+
+      {/* Info */}
+      <div className="card">
+        <h3 className="card-title">Spalten-Erkennung</h3>
+        <div className="info-list">
+          <div className="info-row"><span className="info-from">Order Number</span><span className="info-arrow">→</span><span className="info-to">Bestellnummer</span></div>
+          <div className="info-row"><span className="info-from">ASIN</span><span className="info-arrow">→</span><span className="info-to">Produkt-ID</span></div>
+          <div className="info-row"><span className="info-from">Product Name</span><span className="info-arrow">→</span><span className="info-to">Produktname</span></div>
+          <div className="info-row"><span className="info-from">Consideration Amount</span><span className="info-arrow">→</span><span className="info-to">ETV</span></div>
+          <div className="info-row"><span className="info-from">Shipped Date</span><span className="info-arrow">→</span><span className="info-to">Versanddatum</span></div>
+        </div>
+        <p className="card-note">Duplikate werden automatisch erkannt und aktualisiert.</p>
+      </div>
+    </div>
+  )
+}
+
+// ─── Edit Modal ───
+function EditModal({item,settings,onSave,onClose}) {
+  const [form,setForm] = useState({...item})
+  const set = (k,v) => setForm(f=>({...f,[k]:v}))
+
+  const wertansatz = (parseFloat(form.etv)||0)*(1-(parseFloat(form.abschlag_verwendet)||0))
+  const steuer = wertansatz*settings.steuersatz
+  const gewinnVor = (parseFloat(form.verkaufspreis)||0)-(parseFloat(form.gebuehren_versand)||0)-wertansatz
+  const gewinnNach = gewinnVor-steuer
+  const sellable = isSellable(form)
+  const days = daysUntilSellable(form)
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Artikel bearbeiten</h2>
+          <button className="modal-close" onClick={onClose}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <p className="modal-product">{form.produkt}</p>
+        <p className="modal-meta">{form.asin} · Nr. {form.bestellnummer}</p>
+
+        {/* 6-Month Indicator */}
+        {sellable ? (
+          <div className="modal-sellable-banner">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+            Artikel darf verkauft werden (6 Monate erreicht)
+          </div>
+        ) : days !== null && days > 0 && form.status === 'aktiv' ? (
+          <div className="modal-wait-banner">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            Noch {days} Tage bis zum Verkauf (ab {fmtDate((() => { const d = new Date(form.versanddatum); d.setMonth(d.getMonth()+6); return d })())})
+          </div>
+        ) : null}
+
+        <div className="modal-values">
+          <div className="modal-val-box">
+            <span className="modal-val-label">ETV</span>
+            <span className="modal-val-num amber">{fmt(form.etv)}</span>
+          </div>
+          <div className="modal-val-box">
+            <span className="modal-val-label">Wertansatz</span>
+            <span className="modal-val-num purple">{fmt(wertansatz)}</span>
+          </div>
+        </div>
+
+        {/* Status */}
+        <label className="field-label">Status</label>
+        <div className="status-buttons">
+          {Object.entries(STATUS_LABELS).map(([key,label])=>(
+            <button key={key}
+              className={`status-btn ${form.status===key?'active':''}`}
+              style={{'--btn-color':STATUS_COLORS[key]}}
+              onClick={()=>set('status',key)}>
+              {STATUS_ICONS[key]} {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Abschlag */}
+        <label className="field-label">Abschreibung</label>
+        <div className="abschlag-grid">
+          {ABSCHLAG_OPTIONS.map(opt=>(
+            <button key={opt.value}
+              className={`abschlag-btn ${parseFloat(form.abschlag_verwendet)===opt.value?'active':''}`}
+              onClick={()=>set('abschlag_verwendet',opt.value)}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Sale Details (collapsible) */}
+        <details className="sale-details">
+          <summary className="sale-summary">Verkaufsdetails</summary>
+          <div className="sale-content">
+            <div className="field-row">
+              <div className="field-col">
+                <label className="field-label">Verkaufspreis (€)</label>
+                <input className="field-input" type="number" step="0.01" placeholder="0.00"
+                  value={form.verkaufspreis||''} onChange={e=>set('verkaufspreis',e.target.value?parseFloat(e.target.value):null)} />
+              </div>
+              <div className="field-col">
+                <label className="field-label">Gebühren/Versand (€)</label>
+                <input className="field-input" type="number" step="0.01" placeholder="0.00"
+                  value={form.gebuehren_versand||''} onChange={e=>set('gebuehren_versand',e.target.value?parseFloat(e.target.value):null)} />
+              </div>
+            </div>
+            <label className="field-label">Verkauft am</label>
+            <input className="field-input" type="date" value={form.verkauft_am||''} onChange={e=>set('verkauft_am',e.target.value||null)} />
+
+            {form.verkaufspreis>0 && (
+              <div className="calc-box">
+                <div className="calc-row"><span>Steuer</span><span className="calc-red">{fmt(steuer)}</span></div>
+                <div className="calc-row"><span>Gewinn vor Steuer</span><span className={gewinnVor>=0?'calc-green':'calc-red'}>{fmt(gewinnVor)}</span></div>
+                <div className="calc-row calc-total"><span>Gewinn nach Steuer</span><span className={gewinnNach>=0?'calc-green':'calc-red'}>{fmt(gewinnNach)}</span></div>
+              </div>
+            )}
+          </div>
+        </details>
+
+        {/* Notes */}
+        <label className="field-label">Notizen</label>
+        <textarea className="field-input field-textarea" value={form.notizen||''} onChange={e=>set('notizen',e.target.value)} placeholder="z.B. Defekt, nicht lieferbar..." />
+
+        <button className="btn-primary btn-full" onClick={()=>onSave(form)}>Speichern</button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Settings Modal ───
+function SettingsModal({settings,setSettings,onSave,onClose}) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Einstellungen</h2>
+          <button className="modal-close" onClick={onClose}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+
+        <label className="field-label">Steuersatz (%)</label>
+        <input className="field-input" type="number" step="0.01" min="0" max="1"
+          value={settings.steuersatz}
+          onChange={e=>setSettings(s=>({...s,steuersatz:parseFloat(e.target.value)||0}))} />
+
+        <label className="field-label">Wertminderung / Abschlag (%)</label>
+        <input className="field-input" type="number" step="0.01" min="0" max="1"
+          value={settings.wertminderung}
+          onChange={e=>setSettings(s=>({...s,wertminderung:parseFloat(e.target.value)||0}))} />
+
+        <label className="field-label">Gebührenrate (%)</label>
+        <input className="field-input" type="number" step="0.01" min="0" max="1"
+          value={settings.gebuehrenrate}
+          onChange={e=>setSettings(s=>({...s,gebuehrenrate:parseFloat(e.target.value)||0}))} />
+
+        <p className="settings-hint">Werte als Dezimalzahl eingeben (z.B. 0.35 = 35%)</p>
+
+        <button className="btn-primary btn-full" onClick={onSave}>Einstellungen speichern</button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Icons ───
+function IconDashboard() {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+}
+function IconList() {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+}
+function IconSwipe() {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M12 8v4l2 2"/></svg>
+}
+function IconUpload() {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+}
