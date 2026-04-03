@@ -234,18 +234,18 @@ export default function App() {
   }
 
   // Quick save for swipe review
-  const quickSave = async (item, status, abschlag) => {
+  const quickSave = async (item, status, abschlag, notizen) => {
     try {
       const { error } = await supabase.from('items').update({
         status,
         abschlag_verwendet: abschlag,
         bewertet: true,
         updated_at: new Date().toISOString(),
+        ...(notizen !== undefined ? { notizen } : {}),
       }).eq('id', item.id)
       if (error) throw error
-      // Update local state immediately
       const newWertansatz = (parseFloat(item.etv)||0) * (1 - abschlag)
-      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag, bewertet: true, wertansatz: newWertansatz } : i))
+      setItems(prev => prev.map(i => i.id === item.id ? { ...i, status, abschlag_verwendet: abschlag, bewertet: true, wertansatz: newWertansatz, ...(notizen !== undefined ? { notizen } : {}) } : i))
     } catch(e) { showToast('Fehler: '+e.message,'error') }
   }
 
@@ -707,25 +707,40 @@ function ItemList({items,search,setSearch,statusFilter,setStatusFilter,selectedM
 function SwipeReview({items,index,setIndex,settings,onSave,onEditFull,showToast}) {
   const [currentStatus, setCurrentStatus] = useState('aktiv')
   const [currentAbschlag, setCurrentAbschlag] = useState(0.5)
+  const [currentNotizen, setCurrentNotizen] = useState('')
   const [saving, setSaving] = useState(false)
   const [direction, setDirection] = useState(null)
   const cardRef = useRef(null)
   const touchStartX = useRef(0)
   const touchCurrentX = useRef(0)
+  const notizenRef = useRef(null)
 
   const item = items[index]
+  const showNotizenField = currentAbschlag >= 0.7
 
   useEffect(() => {
     if (item) {
       setCurrentStatus(item.status || 'aktiv')
       setCurrentAbschlag(parseFloat(item.abschlag_verwendet) || settings.wertminderung)
+      setCurrentNotizen(item.notizen || '')
     }
   }, [item, settings.wertminderung])
 
+  useEffect(() => {
+    if (showNotizenField && notizenRef.current) {
+      notizenRef.current.focus()
+    }
+  }, [showNotizenField])
+
   const handleNext = async () => {
     if (!item || saving) return
+    if (showNotizenField && !currentNotizen.trim()) {
+      showToast('Bitte Begründung für 70%+ Abschlag eintragen (Finanzamt)', 'error')
+      notizenRef.current?.focus()
+      return
+    }
     setSaving(true)
-    await onSave(item, currentStatus, currentAbschlag)
+    await onSave(item, currentStatus, currentAbschlag, showNotizenField ? currentNotizen : item.notizen)
     showToast(`${currentStatus === 'defekt' ? 'Defekt' : 'Gespeichert'} – ${ABSCHLAG_OPTIONS.find(o=>o.value===currentAbschlag)?.label || currentAbschlag*100+'%'} Abschlag`)
     setDirection('left')
     setTimeout(() => {
@@ -855,6 +870,24 @@ function SwipeReview({items,index,setIndex,settings,onSave,onEditFull,showToast}
             ))}
           </div>
         </div>
+
+        {/* Notizfeld bei 70%+ Abschlag */}
+        {showNotizenField && (
+          <div className="review-section review-notiz-section">
+            <label className="review-label">
+              📝 Begründung für Finanzamt
+              <span className="review-notiz-hint">Pflichtfeld bei 70%+</span>
+            </label>
+            <textarea
+              ref={notizenRef}
+              className="review-notiz-input"
+              value={currentNotizen}
+              onChange={e=>setCurrentNotizen(e.target.value)}
+              placeholder="z.B. Artikel hat Gebrauchsspuren, Qualitätsmängel, nicht dem Neuwertzustand entsprechend..."
+              rows={3}
+            />
+          </div>
+        )}
 
         {/* Expand button */}
         <button className="review-expand" onClick={()=>onEditFull(item)}>
