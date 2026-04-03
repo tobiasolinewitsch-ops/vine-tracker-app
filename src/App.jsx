@@ -180,7 +180,18 @@ export default function App() {
         }
       }).filter(Boolean)
 
-      if (!upserts.length) { showToast('Keine gültigen Artikel gefunden.','error'); setUploading(false); return }
+      // Duplikate entfernen (gleiche bestellnummer+asin) — letzter Eintrag gewinnt
+      const seen = new Map()
+      upserts.forEach(u => seen.set(u.bestellnummer + '|' + u.asin, u))
+      const deduped = Array.from(seen.values())
+
+      if (!deduped.length) { showToast('Keine gültigen Artikel gefunden.','error'); setUploading(false); return }
+      const dupCount = upserts.length - deduped.length
+      if (dupCount > 0) showToast(`${dupCount} doppelte Einträge ignoriert.`)
+
+      // upserts durch deduplizierte Liste ersetzen
+      upserts.length = 0
+      deduped.forEach(u => upserts.push(u))
 
       // Token-Check: jedes Item kostet 1 Token (Admin hat unbegrenzt)
       if (profile?.role !== 'admin') {
