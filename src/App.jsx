@@ -179,24 +179,26 @@ export default function App() {
 
       // user_id zu jedem Artikel hinzufügen
       const uid = user?.id
+      if (!uid) { showToast('Fehler: Nicht eingeloggt', 'error'); setUploading(false); return }
+
       const upsertsWithUser = upserts.map(u => ({ ...u, user_id: uid }))
-      const { error } = await supabase.from('items').upsert(upsertsWithUser, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
-      if (error) throw error
+      const { error: upsertError } = await supabase.from('items').upsert(upsertsWithUser, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
+      if (upsertError) { showToast('DB-Fehler beim Speichern: ' + (upsertError.message || upsertError.code), 'error'); setUploading(false); return }
 
       // Token abziehen
       if (profile?.role !== 'admin') {
         await supabase.rpc('spend_tokens', { amount: upserts.length })
-        // Profil neu laden damit Token-Stand aktuell ist
         const { data: updatedProfile } = await supabase.from('profiles').select('*').eq('id', uid).single()
         if (updatedProfile) setProfile(updatedProfile)
       }
 
-      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, aktualisierte_artikel: 0, user_id: uid })
+      const { error: importError } = await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, aktualisierte_artikel: 0, user_id: uid })
+      if (importError) console.error('Import log error:', importError)
 
       setUploadResult({ total: upserts.length })
       showToast(`${upserts.length} Artikel importiert!`)
       loadData()
-    } catch(err) { showToast('Upload fehlgeschlagen: '+(err.message || err.details || JSON.stringify(err)),'error'); console.error('Upload error:', err) }
+    } catch(err) { showToast('Upload fehlgeschlagen: '+(err.message || JSON.stringify(err)),'error'); console.error('Upload error:', err) }
     setUploading(false)
     e.target.value = ''
   }
