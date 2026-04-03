@@ -319,7 +319,7 @@ export default function App() {
             settings={settings}
             onMonthClick={m=>{setSelectedMonth(m);setView('items')}}
             onSellableClick={()=>{setSellableFilter(true);setView('items')}}
-            onStatusClick={key=>{setStatusFilter(key);setView('items')}}
+            onStatusClick={(key,month)=>{setStatusFilter(key);if(month){setSelectedMonth(month)}else{setSelectedMonth(null)};setView('items')}}
             onReviewClick={()=>setView('review')}
           />
         )}
@@ -395,12 +395,16 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
     steuer: sel.wertansatz * settings.steuersatz,
     verkauf: sel.items.reduce((s,i)=>s+(parseFloat(i.verkaufspreis)||0),0),
     label: sel.name,
+    statusCounts: Object.fromEntries(
+      Object.keys(STATUS_LABELS).map(k=>[k, sel.items.filter(i=>i.status===k).length])
+    ),
   } : {
     etv: totals.etv,
     wertansatz: totals.wertansatz,
     steuer: totals.steuer,
     verkauf: totals.verkauf,
     label: null,
+    statusCounts: null,
   }
 
   return (
@@ -474,13 +478,13 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
 
       {/* Status Overview */}
       <div className="card">
-        <h3 className="card-title">Status</h3>
+        <h3 className="card-title">Status{kpi.label ? ` · ${kpi.label}` : ''}</h3>
         <div className="status-pills">
           {Object.entries(STATUS_LABELS).map(([key,label])=>{
-            const count = totals[key] || 0
+            const count = kpi.statusCounts ? (kpi.statusCounts[key] || 0) : (totals[key] || 0)
             return (
               <button key={key} className="status-pill" style={{'--status-color':STATUS_COLORS[key]}}
-                onClick={()=>count>0&&onStatusClick(key)} disabled={count===0}>
+                onClick={()=>count>0&&onStatusClick(key, selectedMonth!==null ? selectedMonth+1 : null)} disabled={count===0}>
                 <span className="status-pill-icon">{STATUS_ICONS[key]}</span>
                 <span className="status-pill-count">{count}</span>
                 <span className="status-pill-label">{label}</span>
