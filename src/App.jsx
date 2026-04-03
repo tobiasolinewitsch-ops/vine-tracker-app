@@ -74,20 +74,22 @@ export default function App() {
   const [reviewIndex, setReviewIndex] = useState(0)
 
   const loadProfile = useCallback(async (uid) => {
-    const { data } = await supabase.from('profiles').select('*').eq('id', uid).single()
-    if (data?.is_blocked) {
-      await supabase.auth.signOut()
-      return null
-    }
-    setProfile(data)
-    return data
+    try {
+      const { data } = await supabase.from('profiles').select('*').eq('id', uid).single()
+      if (data?.is_blocked) {
+        await supabase.auth.signOut()
+        return null
+      }
+      setProfile(data)
+      return data
+    } catch(e) { return null }
   }, [])
 
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       const u = session?.user ?? null
       setUser(u)
-      if (u) await loadProfile(u.id)
+      try { if (u) await loadProfile(u.id) } catch(e) {}
       setAuthLoading(false)
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
