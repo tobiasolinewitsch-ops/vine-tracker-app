@@ -53,6 +53,7 @@ function parseITIMDate(d) {
 // ─── Main App ───
 export default function App() {
   const [user, setUser] = useState(null)
+  const [profile, setProfile] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [profileOpen, setProfileOpen] = useState(false)
 
@@ -72,16 +73,31 @@ export default function App() {
   const [reviewMode, setReviewMode] = useState(false)
   const [reviewIndex, setReviewIndex] = useState(0)
 
+  const loadProfile = useCallback(async (uid) => {
+    const { data } = await supabase.from('profiles').select('*').eq('id', uid).single()
+    if (data?.is_blocked) {
+      await supabase.auth.signOut()
+      return null
+    }
+    setProfile(data)
+    return data
+  }, [])
+
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      const u = session?.user ?? null
+      setUser(u)
+      if (u) await loadProfile(u.id)
       setAuthLoading(false)
     })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const u = session?.user ?? null
+      setUser(u)
+      if (u) await loadProfile(u.id)
+      else setProfile(null)
     })
     return () => subscription.unsubscribe()
-  }, [])
+  }, [loadProfile])
 
   const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
 
@@ -151,10 +167,27 @@ export default function App() {
 
       if (!upserts.length) { showToast('Keine gültigen Daten gefunden.','error'); setUploading(false); return }
 
-      const { error } = await supabase.from('items').upsert(upserts, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
+      // Free-Tier-Limit: max 5 neue Artikel pro Monat
+      if (profile?.subscription === 'free') {
+        const { data: countData } = await supabase.rpc('count_my_monthly_items')
+        const existing = countData || 0
+        if (existing >= 5) {
+          showToast('Free-Limit erreicht: max. 5 Artikel/Monat. Upgrade auf Premium für unbegrenzten Zugang.', 'error')
+          setUploading(false); return
+        }
+        if (existing + upserts.length > 5) {
+          showToast(`Nur noch ${5 - existing} Artikel diesen Monat möglich (Free-Limit). Bitte Datei kürzen oder Premium holen.`, 'error')
+          setUploading(false); return
+        }
+      }
+
+      // user_id zu jedem Artikel hinzufügen
+      const uid = user?.id
+      const upsertsWithUser = upserts.map(u => ({ ...u, user_id: uid }))
+      const { error } = await supabase.from('items').upsert(upsertsWithUser, { onConflict:'bestellnummer,asin', ignoreDuplicates:false })
       if (error) throw error
 
-      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length })
+      await supabase.from('imports').insert({ dateiname:file.name, anzahl_artikel:upserts.length, neue_artikel:upserts.length, user_id: uid })
 
       setUploadResult({ total: upserts.length })
       showToast(`${upserts.length} Artikel importiert!`)
@@ -351,7 +384,11 @@ export default function App() {
             result={uploadResult}
             unreviewedCount={unreviewedItems.length}
             onStartReview={()=>{setReviewIndex(0);setView('review')}}
+            profile={profile}
           />
+        )}
+        {view==='admin' && profile?.role==='admin' && (
+          <AdminPanel showToast={showToast} />
         )}
       </main>
 
@@ -362,6 +399,7 @@ export default function App() {
           {id:'items',label:'Artikel',icon:<IconList/>},
           {id:'review',label:'Bewerten',icon:<IconSwipe/>, badge: unreviewedItems.length||null},
           {id:'upload',label:'Import',icon:<IconUpload/>},
+          ...(profile?.role==='admin' ? [{id:'admin',label:'Admin',icon:<IconAdmin/>}] : []),
         ].map(tab=>(
           <button key={tab.id} className={`nav-tab ${view===tab.id?'active':''}`}
             onClick={()=>{setView(tab.id);if(tab.id!=='items'){setSelectedMonth(null);setSellableFilter(false)}}}>
@@ -837,9 +875,18 @@ function SwipeReview({items,index,setIndex,settings,onSave,onEditFull,showToast}
 }
 
 // ─── Upload View ───
-function UploadView({onUpload,uploading,result,unreviewedCount,onStartReview}) {
+function UploadView({onUpload,uploading,result,unreviewedCount,onStartReview,profile}) {
   return (
     <div className="view-stack">
+      {profile?.subscription === 'free' && (
+        <div className="free-limit-banner">
+          <div>
+            <strong>Free-Plan</strong>
+            <span>Max. 5 neue Artikel pro Monat</span>
+          </div>
+          <span className="free-limit-badge">Upgrade: 9,99 €/Monat</span>
+        </div>
+      )}
       <div className="card">
         <h3 className="card-title">Vine Report importieren</h3>
         <p className="card-desc">
@@ -1171,6 +1218,111 @@ function ProfileModal({user, onClose, showToast}) {
   )
 }
 
+// ─── Admin Panel ───
+function AdminPanel({showToast}) {
+  const [users, setUsers] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    const { data, error } = await supabase.rpc('admin_get_users')
+    if (error) showToast('Fehler: ' + error.message, 'error')
+    else setUsers(data || [])
+    setLoading(false)
+  }, [showToast])
+
+  useEffect(() => { load() }, [load])
+
+  const toggleBlock = async (u) => {
+    const { error } = await supabase.rpc('admin_update_user', {
+      target_id: u.id,
+      new_is_blocked: !u.is_blocked,
+    })
+    if (error) showToast('Fehler: ' + error.message, 'error')
+    else { showToast(u.is_blocked ? 'Nutzer entsperrt' : 'Nutzer gesperrt'); load() }
+  }
+
+  const toggleSubscription = async (u) => {
+    const next = u.subscription === 'free' ? 'premium' : 'free'
+    const { error } = await supabase.rpc('admin_update_user', {
+      target_id: u.id,
+      new_subscription: next,
+    })
+    if (error) showToast('Fehler: ' + error.message, 'error')
+    else { showToast(`Abo auf ${next === 'premium' ? 'Premium (9,99 €)' : 'Free'} geändert`); load() }
+  }
+
+  return (
+    <div className="view-stack">
+      <div className="card">
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+          <h3 className="card-title" style={{marginBottom:0}}>Nutzerverwaltung</h3>
+          <span style={{fontSize:12,color:'#64748b'}}>{users.length} Nutzer</span>
+        </div>
+        <p className="card-desc" style={{fontSize:12,color:'#64748b',marginBottom:16}}>
+          Free = 5 Artikel/Monat · Premium = 9,99 €/Monat unbegrenzt
+        </p>
+
+        {loading ? (
+          <div style={{textAlign:'center',padding:32,color:'#64748b'}}>Lädt...</div>
+        ) : users.map(u => (
+          <div key={u.id} className="admin-user-row">
+            <div className="admin-user-info">
+              <div className="admin-user-name">
+                {u.full_name || '—'}
+                {u.role === 'admin' && <span className="admin-badge">Admin</span>}
+                {u.is_blocked && <span className="admin-badge blocked">Gesperrt</span>}
+              </div>
+              <div className="admin-user-email">{u.email}</div>
+              <div className="admin-user-meta">
+                {u.item_count} Artikel · Seit {new Date(u.created_at).toLocaleDateString('de-DE')}
+              </div>
+            </div>
+            <div className="admin-user-actions">
+              <button
+                className={`admin-sub-btn ${u.subscription === 'premium' ? 'premium' : 'free'}`}
+                onClick={() => toggleSubscription(u)}
+                disabled={u.role === 'admin'}
+                title={u.role === 'admin' ? 'Admin ist immer Premium' : ''}
+              >
+                {u.subscription === 'premium' ? '★ Premium' : 'Free'}
+              </button>
+              <button
+                className={`admin-block-btn ${u.is_blocked ? 'blocked' : ''}`}
+                onClick={() => toggleBlock(u)}
+                disabled={u.role === 'admin'}
+                title={u.role === 'admin' ? 'Admin kann nicht gesperrt werden' : ''}
+              >
+                {u.is_blocked ? 'Entsperren' : 'Sperren'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">Abo-Modell</h3>
+        <div className="plan-grid">
+          <div className="plan-card">
+            <div className="plan-name">Free</div>
+            <div className="plan-price">0 €</div>
+            <div className="plan-feature">✓ Registrierung</div>
+            <div className="plan-feature">✓ 5 Artikel / Monat</div>
+            <div className="plan-feature muted">✕ Unbegrenzte Artikel</div>
+          </div>
+          <div className="plan-card premium">
+            <div className="plan-name">Premium</div>
+            <div className="plan-price">9,99 €<span>/Monat</span></div>
+            <div className="plan-feature">✓ Registrierung</div>
+            <div className="plan-feature">✓ 5 Artikel / Monat</div>
+            <div className="plan-feature">✓ Unbegrenzte Artikel</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Icons ───
 function IconDashboard() {
   return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
@@ -1183,4 +1335,7 @@ function IconSwipe() {
 }
 function IconUpload() {
   return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+}
+function IconAdmin() {
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
 }
