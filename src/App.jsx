@@ -130,13 +130,16 @@ export default function App() {
 
       if (!raw.length) { showToast('Datei ist leer oder unlesbar.','error'); setUploading(false); return }
 
-      showToast('KI analysiert die Datei...', 'success')
+      // Spaltennamen + Beispielzeilen an Claude schicken (nicht alle Daten)
+      const headers = Object.keys(raw[0])
+      const sampleRows = raw.slice(0, 5)
 
-      // Claude API zur Auswertung
+      showToast('KI erkennt Spalten...', 'success')
+
       const response = await fetch('/api/parse-excel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: raw }),
+        body: JSON.stringify({ headers, sampleRows }),
       })
       const result = await response.json()
       if (!response.ok || result.error) {
@@ -144,20 +147,33 @@ export default function App() {
         setUploading(false); return
       }
 
-      const upserts = (result.items || []).map(item => ({
-        bestellnummer: String(item.bestellnummer || '').trim(),
-        asin: String(item.asin || '').trim(),
-        produkt: String(item.produkt || 'Unbekannt').trim(),
-        order_type: String(item.order_type || 'ORDER').trim(),
-        bestelldatum: item.bestelldatum || null,
-        versanddatum: item.versanddatum || null,
-        storno_datum: item.storno_datum || null,
-        etv: parseFloat(item.etv) || 0,
-        abschlag_verwendet: settings.wertminderung,
-        status: item.storno_datum ? 'storniert' : 'aktiv',
-      })).filter(i => i.bestellnummer && i.asin)
+      const m = result.mapping
+      if (!m?.bestellnummer || !m?.asin) {
+        showToast('Spalten konnten nicht erkannt werden. Bitte Format prüfen.', 'error')
+        setUploading(false); return
+      }
 
-      if (!upserts.length) { showToast('KI konnte keine Artikel erkennen. Bitte Format prüfen.','error'); setUploading(false); return }
+      // Alle Zeilen lokal mit dem erkannten Mapping parsen
+      const upserts = raw.map(row => {
+        const bestellnummer = String(row[m.bestellnummer] || '').trim()
+        const asin = String(row[m.asin] || '').trim()
+        if (!bestellnummer || !asin) return null
+        const etvRaw = m.etv ? String(row[m.etv] || '0').replace(',', '.') : '0'
+        const storno_datum = m.storno_datum ? parseITIMDate(row[m.storno_datum]) : null
+        return {
+          bestellnummer, asin,
+          produkt: String(m.produkt ? (row[m.produkt] || 'Unbekannt') : 'Unbekannt').trim(),
+          order_type: String(m.order_type ? (row[m.order_type] || 'ORDER') : 'ORDER').trim(),
+          bestelldatum: m.bestelldatum ? parseITIMDate(row[m.bestelldatum]) : null,
+          versanddatum: m.versanddatum ? parseITIMDate(row[m.versanddatum]) : null,
+          storno_datum: storno_datum || null,
+          etv: parseFloat(etvRaw) || 0,
+          abschlag_verwendet: settings.wertminderung,
+          status: storno_datum ? 'storniert' : 'aktiv',
+        }
+      }).filter(Boolean)
+
+      if (!upserts.length) { showToast('Keine gültigen Artikel gefunden.','error'); setUploading(false); return }
 
       // Token-Check: jedes Item kostet 1 Token (Admin hat unbegrenzt)
       if (profile?.role !== 'admin') {

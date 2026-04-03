@@ -3,44 +3,31 @@ export const config = { maxDuration: 30 }
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { rows } = req.body
-  if (!rows || !rows.length) return res.status(400).json({ error: 'No rows provided' })
+  const { headers, sampleRows } = req.body || {}
+  if (!headers || !sampleRows) return res.status(400).json({ error: 'Missing headers or sampleRows' })
 
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return res.status(500).json({ error: 'API key not configured' })
 
-  // Ersten 3 Zeilen als Beispiel zeigen + alle Spaltenüberschriften
-  const headers = Object.keys(rows[0] || {})
-  const sampleRows = rows.slice(0, 3)
+  const prompt = `Du bist ein Experte für Amazon Vine ITIM-Reports.
+Ich habe eine Excel-Datei mit diesen Spalten: ${JSON.stringify(headers)}
 
-  const prompt = `Du bist ein Datenextraktor für Amazon Vine ITIM-Reports. Analysiere diese Excel-Daten und extrahiere strukturierte Artikel-Daten.
-
-Spaltenüberschriften in der Datei: ${headers.join(', ')}
-
-Beispiel-Zeilen (erste 3):
+Beispiel-Daten (erste Zeilen):
 ${JSON.stringify(sampleRows, null, 2)}
 
-Alle Zeilen (${rows.length} Stück):
-${JSON.stringify(rows, null, 2)}
+Identifiziere welche Spalte welchem Feld entspricht und antworte NUR mit einem JSON-Objekt:
+{
+  "bestellnummer": "exakter Spaltenname für Bestellnummer/Order Number/Order ID",
+  "asin": "exakter Spaltenname für ASIN",
+  "produkt": "exakter Spaltenname für Produktname",
+  "etv": "exakter Spaltenname für ETV/Preis/Consideration Amount",
+  "order_type": "exakter Spaltenname für Bestelltyp (oder null wenn nicht vorhanden)",
+  "bestelldatum": "exakter Spaltenname für Bestelldatum (oder null)",
+  "versanddatum": "exakter Spaltenname für Versanddatum/Shipped Date (oder null)",
+  "storno_datum": "exakter Spaltenname für Stornodatum/Cancelled Date (oder null)"
+}
 
-Extrahiere für JEDE Zeile folgende Felder und gib ein JSON-Array zurück:
-- bestellnummer: Bestellnummer / Order Number / Order ID
-- asin: ASIN-Code (B0...)
-- produkt: Produktname / Product Name
-- etv: ETV / Consideration Amount als Zahl (Komma zu Punkt, nur Zahl)
-- order_type: Order Type (ORDER, RETURN, etc.) - Standard: "ORDER"
-- bestelldatum: Bestelldatum als YYYY-MM-DD oder null
-- versanddatum: Versanddatum / Shipped Date als YYYY-MM-DD oder null
-- storno_datum: Stornodatum / Cancelled Date als YYYY-MM-DD oder null
-
-Regeln:
-- Zeilen ohne ASIN oder Bestellnummer überspringen
-- Kopfzeilen und leere Zeilen überspringen
-- Datumsformat immer YYYY-MM-DD
-- Zahlen ohne Währungssymbol, Punkt als Dezimaltrenner
-- Nur valides JSON zurückgeben, kein Text drumherum
-
-Antwort NUR als JSON-Array: [{"bestellnummer":"...","asin":"...","produkt":"...","etv":0.00,...}, ...]`
+Nur valides JSON, kein Text davor oder danach.`
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -52,25 +39,24 @@ Antwort NUR als JSON-Array: [{"bestellnummer":"...","asin":"...","produkt":"..."
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 8000,
+        max_tokens: 500,
         messages: [{ role: 'user', content: prompt }],
       }),
     })
 
     if (!response.ok) {
       const err = await response.text()
-      return res.status(500).json({ error: 'Claude API error: ' + err })
+      return res.status(500).json({ error: 'Claude API Fehler: ' + err })
     }
 
     const data = await response.json()
     const text = data.content?.[0]?.text || ''
 
-    // JSON aus Antwort extrahieren
-    const jsonMatch = text.match(/\[[\s\S]*\]/)
-    if (!jsonMatch) return res.status(500).json({ error: 'Kein JSON in Antwort: ' + text.slice(0, 200) })
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return res.status(500).json({ error: 'Kein JSON in Antwort: ' + text.slice(0, 300) })
 
-    const items = JSON.parse(jsonMatch[0])
-    return res.status(200).json({ items })
+    const mapping = JSON.parse(jsonMatch[0])
+    return res.status(200).json({ mapping })
   } catch (e) {
     return res.status(500).json({ error: e.message })
   }
