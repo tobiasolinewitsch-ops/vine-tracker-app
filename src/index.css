@@ -680,3 +680,19 @@ button{cursor:pointer;border:none;background:none;-webkit-tap-highlight-color:tr
 
 /* ─── Settings ─── */
 .settings-hint{font-size:12px;color:#64748b;margin-top:8px}
+
+/* ─── Auth Screen ─── */
+.auth-screen{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:20px;background:#0a0f1a}
+.auth-card{width:100%;max-width:400px;background:#111827;border-radius:24px;padding:32px 24px;display:flex;flex-direction:column;align-items:center;gap:0;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+.auth-logo{width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,#f59e0b,#f97316);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:900;color:#0a0f1a;margin-bottom:12px}
+.auth-title{font-size:22px;font-weight:800;color:#f1f5f9;margin-bottom:20px}
+.auth-tabs{display:flex;background:#0a0f1a;border-radius:12px;padding:4px;gap:4px;width:100%;margin-bottom:20px}
+.auth-tab{flex:1;padding:10px;border-radius:8px;font-size:14px;font-weight:600;color:#64748b;transition:all .15s}
+.auth-tab.active{background:#1e293b;color:#f1f5f9}
+.auth-form{width:100%;display:flex;flex-direction:column;gap:10px}
+.auth-error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:10px;padding:10px 14px;font-size:13px}
+.auth-success{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#86efac;border-radius:10px;padding:14px;font-size:14px;text-align:center;line-height:1.5;width:100%}
+
+/* ─── Profile / Logout ─── */
+.btn-logout{width:100%;margin-top:12px;padding:12px;border-radius:12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);color:#f87171;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:8px;transition:all .15s}
+.btn-logout:active{background:rgba(239,68,68,.2)}

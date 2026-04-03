@@ -52,6 +52,10 @@ function parseITIMDate(d) {
 
 // ─── Main App ───
 export default function App() {
+  const [user, setUser] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [profileOpen, setProfileOpen] = useState(false)
+
   const [items, setItems] = useState([])
   const [settings, setSettings] = useState({ steuersatz: 0.35, wertminderung: 0.5, gebuehrenrate: 0 })
   const [view, setView] = useState('dashboard')
@@ -68,6 +72,17 @@ export default function App() {
   const [reviewMode, setReviewMode] = useState(false)
   const [reviewIndex, setReviewIndex] = useState(0)
   const [reviewedIds, setReviewedIds] = useState(new Set())
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null)
+      setAuthLoading(false)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+    })
+    return () => subscription.unsubscribe()
+  }, [])
 
   const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
 
@@ -242,13 +257,25 @@ export default function App() {
     items.filter(i => i.status === 'aktiv' && !i.notizen && !i.verkaufspreis && !reviewedIds.has(i.id))
   ,[items, reviewedIds])
 
-  if (loading) return (
+  if (authLoading) return (
     <div className="loading-screen">
       <div className="loading-vine">
         <div className="loading-logo">V</div>
         <div className="loading-spinner" />
       </div>
       <p className="loading-text">Vine Tracker lädt...</p>
+    </div>
+  )
+
+  if (!user) return <AuthScreen onAuth={setUser} />
+
+  if (loading) return (
+    <div className="loading-screen">
+      <div className="loading-vine">
+        <div className="loading-logo">V</div>
+        <div className="loading-spinner" />
+      </div>
+      <p className="loading-text">Daten werden geladen...</p>
     </div>
   )
 
@@ -272,6 +299,9 @@ export default function App() {
               {totals.sellable} verkaufbar
             </button>
           )}
+          <button className="header-btn" onClick={()=>setProfileOpen(true)} aria-label="Profil">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+          </button>
           <button className="header-btn" onClick={()=>setSettingsOpen(true)} aria-label="Einstellungen">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
           </button>
@@ -344,6 +374,7 @@ export default function App() {
       {/* Modals */}
       {editItem && <EditModal item={editItem} settings={settings} onSave={saveItem} onClose={()=>setEditItem(null)} />}
       {settingsOpen && <SettingsModal settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={()=>setSettingsOpen(false)} />}
+      {profileOpen && <ProfileModal user={user} onClose={()=>setProfileOpen(false)} showToast={showToast} />}
     </div>
   )
 }
@@ -920,6 +951,127 @@ function SettingsModal({settings,setSettings,onSave,onClose}) {
         <p className="settings-hint">Werte als Dezimalzahl eingeben (z.B. 0.35 = 35%)</p>
 
         <button className="btn-primary btn-full" onClick={onSave}>Einstellungen speichern</button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Auth Screen ───
+function AuthScreen({onAuth}) {
+  const [tab, setTab] = useState('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [success, setSuccess] = useState(null)
+
+  const handleLogin = async (e) => {
+    e.preventDefault()
+    setLoading(true); setError(null)
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) setError(error.message)
+    else onAuth(data.user)
+    setLoading(false)
+  }
+
+  const handleRegister = async (e) => {
+    e.preventDefault()
+    setLoading(true); setError(null)
+    const { error } = await supabase.auth.signUp({
+      email, password,
+      options: { data: { full_name: name } }
+    })
+    if (error) setError(error.message)
+    else setSuccess('Bestätigungs-E-Mail wurde gesendet! Bitte bestätige deine E-Mail-Adresse.')
+    setLoading(false)
+  }
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="auth-logo">V</div>
+        <h1 className="auth-title">Vine Tracker</h1>
+        <div className="auth-tabs">
+          <button className={`auth-tab ${tab==='login'?'active':''}`} onClick={()=>{setTab('login');setError(null);setSuccess(null)}}>Anmelden</button>
+          <button className={`auth-tab ${tab==='register'?'active':''}`} onClick={()=>{setTab('register');setError(null);setSuccess(null)}}>Registrieren</button>
+        </div>
+        {success ? (
+          <div className="auth-success">{success}</div>
+        ) : (
+          <form onSubmit={tab==='login'?handleLogin:handleRegister} className="auth-form">
+            {tab==='register' && (
+              <input className="field-input" type="text" placeholder="Dein Name" value={name}
+                onChange={e=>setName(e.target.value)} required />
+            )}
+            <input className="field-input" type="email" placeholder="E-Mail" value={email}
+              onChange={e=>setEmail(e.target.value)} required />
+            <input className="field-input" type="password" placeholder="Passwort" value={password}
+              onChange={e=>setPassword(e.target.value)} required minLength={6} />
+            {error && <div className="auth-error">{error}</div>}
+            <button className="btn-primary btn-full" type="submit" disabled={loading}>
+              {loading ? 'Bitte warten...' : tab==='login' ? 'Anmelden' : 'Registrieren'}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Profile Modal ───
+function ProfileModal({user, onClose, showToast}) {
+  const [name, setName] = useState(user.user_metadata?.full_name || '')
+  const [email, setEmail] = useState(user.email || '')
+  const [password, setPassword] = useState('')
+  const [passwordConfirm, setPasswordConfirm] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const save = async () => {
+    setLoading(true)
+    const updates = { data: { full_name: name } }
+    if (email !== user.email) updates.email = email
+    if (password) {
+      if (password !== passwordConfirm) { showToast('Passwörter stimmen nicht überein', 'error'); setLoading(false); return }
+      if (password.length < 6) { showToast('Passwort mindestens 6 Zeichen', 'error'); setLoading(false); return }
+      updates.password = password
+    }
+    const { error } = await supabase.auth.updateUser(updates)
+    if (error) showToast('Fehler: ' + error.message, 'error')
+    else {
+      showToast(email !== user.email ? 'Bestätigungs-E-Mail gesendet!' : 'Profil gespeichert!')
+      if (!updates.email) onClose()
+    }
+    setLoading(false)
+  }
+
+  const logout = async () => {
+    await supabase.auth.signOut()
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Mein Profil</h2>
+          <button className="modal-close" onClick={onClose}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <label className="field-label">Name</label>
+        <input className="field-input" type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="Dein Name" />
+        <label className="field-label">E-Mail</label>
+        <input className="field-input" type="email" value={email} onChange={e=>setEmail(e.target.value)} />
+        <label className="field-label">Neues Passwort (leer lassen = unverändert)</label>
+        <input className="field-input" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Neues Passwort" minLength={6} />
+        <input className="field-input" type="password" value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)} placeholder="Passwort bestätigen" style={{marginTop:8}} />
+        <button className="btn-primary btn-full" onClick={save} disabled={loading} style={{marginTop:16}}>
+          {loading ? 'Speichern...' : 'Änderungen speichern'}
+        </button>
+        <button className="btn-logout" onClick={logout}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Abmelden
+        </button>
       </div>
     </div>
   )
