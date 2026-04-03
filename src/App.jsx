@@ -85,7 +85,7 @@ export default function App() {
     } catch(e) { return null }
   }, [])
 
-  const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null),3000) }
+  const showToast = (msg, type='success') => { setToast({msg,type}); setTimeout(()=>setToast(null), type==='error' ? 10000 : 3000) }
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -128,22 +128,29 @@ export default function App() {
       const ws = wb.Sheets[wb.SheetNames[0]]
       const raw = XLSX.utils.sheet_to_json(ws, { defval:'', raw: false })
 
-      if (!raw.length) { showToast('Datei ist leer oder unlesbar.','error'); setUploading(false); return }
+      if (!raw.length) { showToast('Schritt 1 fehlgeschlagen: Datei ist leer oder kein gültiges XLSX/CSV.','error'); setUploading(false); return }
+
+      showToast(`Schritt 1 OK: ${raw.length} Zeilen gelesen. KI erkennt Spalten...`)
 
       // Spaltennamen + Beispielzeilen an Claude schicken (nicht alle Daten)
       const headers = Object.keys(raw[0])
       const sampleRows = raw.slice(0, 5)
 
-      showToast('KI erkennt Spalten...', 'success')
+      let response, result
+      try {
+        response = await fetch('/api/parse-excel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ headers, sampleRows }),
+        })
+        result = await response.json()
+      } catch(fetchErr) {
+        showToast('Schritt 2 fehlgeschlagen: Netzwerkfehler – ' + fetchErr.message, 'error')
+        setUploading(false); return
+      }
 
-      const response = await fetch('/api/parse-excel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ headers, sampleRows }),
-      })
-      const result = await response.json()
       if (!response.ok || result.error) {
-        showToast('KI-Fehler: ' + (result.error || 'Unbekannt'), 'error')
+        showToast('Schritt 2 fehlgeschlagen: ' + (result.error || 'HTTP ' + response.status), 'error')
         setUploading(false); return
       }
 
