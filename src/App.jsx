@@ -323,6 +323,103 @@ export default function App() {
     items.filter(i => i.status === 'aktiv' && !i.bewertet)
   ,[items])
 
+  function exportExcel() {
+    if (!items.length) return showToast('Keine Artikel zum Exportieren','error')
+
+    const STATUS_DE = { aktiv:'Aktiv', defekt:'Defekt', verkauft:'Verkauft', storniert:'Storniert', verschenkt:'Verschenkt' }
+    const fmtD = d => d ? new Date(d).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'}) : ''
+    const pct = v => `${((parseFloat(v)||0)*100).toFixed(0)}%`
+    const eur = v => parseFloat(v)||0
+
+    // Haupttabelle
+    const rows = items.map(item => {
+      const etv = eur(item.etv)
+      const wa = eur(item.wertansatz)
+      const steuer = wa * settings.steuersatz
+      const vp = eur(item.verkaufspreis)
+      const geb = eur(item.gebuehren_versand)
+      const gewinnVor = vp > 0 ? vp - geb - wa : 0
+      const gewinnNach = vp > 0 ? gewinnVor - steuer : 0
+      return {
+        'Bestellnummer': item.bestellnummer || '',
+        'ASIN': item.asin || '',
+        'Produkt': item.produkt || '',
+        'Bestelldatum': fmtD(item.bestelldatum),
+        'Versanddatum': fmtD(item.versanddatum),
+        'Status': STATUS_DE[item.status] || item.status,
+        'ETV (€)': etv,
+        'Abschreibung': pct(item.abschlag_verwendet),
+        'Wertansatz (€)': wa,
+        'Steuer (€)': steuer,
+        'Verkaufspreis (€)': vp > 0 ? vp : '',
+        'Gebühren/Versand (€)': geb > 0 ? geb : '',
+        'Verkauft am': fmtD(item.verkauft_am),
+        'Gewinn vor Steuer (€)': vp > 0 ? gewinnVor : '',
+        'Gewinn nach Steuer (€)': vp > 0 ? gewinnNach : '',
+        'Notizen': item.notizen || '',
+      }
+    })
+
+    // Zusammenfassung
+    const summary = [
+      { 'Übersicht': 'Steuersatz', 'Wert': pct(settings.steuersatz) },
+      { 'Übersicht': 'Standard-Wertminderung', 'Wert': pct(settings.wertminderung) },
+      { 'Übersicht': 'Gebührenrate', 'Wert': pct(settings.gebuehrenrate) },
+      { 'Übersicht': '', 'Wert': '' },
+      { 'Übersicht': 'Anzahl Artikel', 'Wert': items.length },
+      { 'Übersicht': 'Davon Aktiv', 'Wert': totals.aktiv },
+      { 'Übersicht': 'Davon Verkauft', 'Wert': totals.verkauft },
+      { 'Übersicht': 'Davon Defekt', 'Wert': totals.defekt },
+      { 'Übersicht': 'Davon Storniert', 'Wert': totals.storniert },
+      { 'Übersicht': 'Davon Verschenkt', 'Wert': totals.verschenkt },
+      { 'Übersicht': '', 'Wert': '' },
+      { 'Übersicht': 'ETV Gesamt', 'Wert': `${totals.etv.toFixed(2)} €` },
+      { 'Übersicht': 'Wertansatz Gesamt', 'Wert': `${totals.wertansatz.toFixed(2)} €` },
+      { 'Übersicht': 'Erwartete Steuer', 'Wert': `${totals.steuer.toFixed(2)} €` },
+      { 'Übersicht': 'Verkaufserlöse Gesamt', 'Wert': `${totals.verkauf.toFixed(2)} €` },
+      { 'Übersicht': '', 'Wert': '' },
+      { 'Übersicht': 'Exportiert am', 'Wert': new Date().toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}) },
+    ]
+
+    const wb = XLSX.utils.book_new()
+
+    // Sheet 1: Alle Artikel
+    const wsArticles = XLSX.utils.json_to_sheet(rows)
+    const colWidths = [16,14,40,12,12,12,12,12,14,12,16,18,12,20,20,30]
+    wsArticles['!cols'] = colWidths.map(w => ({ wch: w }))
+    XLSX.utils.book_append_sheet(wb, wsArticles, 'Artikel')
+
+    // Sheet 2: Zusammenfassung
+    const wsSummary = XLSX.utils.json_to_sheet(summary)
+    wsSummary['!cols'] = [{ wch: 24 }, { wch: 20 }]
+    XLSX.utils.book_append_sheet(wb, wsSummary, 'Zusammenfassung')
+
+    // Sheet 3: Monatliche Übersicht
+    const monthRows = monthlyData.filter(m => m.items.length > 0).map(m => ({
+      'Monat': m.name,
+      'Anzahl Artikel': m.items.length,
+      'ETV (€)': m.etv,
+      'Wertansatz (€)': m.wertansatz,
+      'Steuer (€)': m.wertansatz * settings.steuersatz,
+      'Bewertet': m.bewertetCount,
+    }))
+    monthRows.push({
+      'Monat': 'GESAMT',
+      'Anzahl Artikel': items.length,
+      'ETV (€)': totals.etv,
+      'Wertansatz (€)': totals.wertansatz,
+      'Steuer (€)': totals.steuer,
+      'Bewertet': totals.bewertet,
+    })
+    const wsMonths = XLSX.utils.json_to_sheet(monthRows)
+    wsMonths['!cols'] = [{ wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 10 }]
+    XLSX.utils.book_append_sheet(wb, wsMonths, 'Monatlich')
+
+    const date = new Date().toISOString().slice(0,10)
+    XLSX.writeFile(wb, `Vine-Report_${date}.xlsx`)
+    showToast('Excel-Report exportiert')
+  }
+
   if (authLoading) return (
     <div className="loading-screen">
       <div className="loading-vine">
@@ -385,6 +482,7 @@ export default function App() {
             onSellableClick={()=>{setSellableFilter(true);setView('items')}}
             onStatusClick={(key,month)=>{setStatusFilter(key);if(month){setSelectedMonth(month)}else{setSelectedMonth(null)};setView('items')}}
             onReviewClick={()=>setView('review')}
+            onExport={exportExcel}
           />
         )}
         {view==='items' && (
@@ -453,7 +551,7 @@ export default function App() {
 }
 
 // ─── Dashboard ───
-function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick,onReviewClick}) {
+function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onStatusClick,onReviewClick,onExport}) {
   const [selectedMonth, setSelectedMonth] = useState(null) // index 0-11
   const maxETV = Math.max(...monthlyData.map(m=>m.etv),1)
   const activeMonths = monthlyData.filter(m=>m.items.length>0)
@@ -639,6 +737,12 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
           </div>
         </div>
       </div>
+
+      {/* Excel Export */}
+      <button className="export-btn" onClick={onExport}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Excel-Report für Finanzamt exportieren
+      </button>
     </div>
   )
 }
