@@ -701,14 +701,14 @@ function ItemList({items,settings,search,setSearch,statusFilter,setStatusFilter,
                   <p className="item-wa">{fmt(item.wertansatz)}</p>
                 </div>
               </div>
-              {item.status === 'aktiv' && (parseFloat(item.wertansatz)||0) > 0 && (
+              {item.status === 'aktiv' && (parseFloat(item.etv)||0) > 0 && (
                 <div className="item-prices">
                   <span className="item-price-label">VK:</span>
                   <span className="item-price p20">
-                    20%: {fmt((parseFloat(item.wertansatz)||0)*(1+settings.steuersatz+0.20)/(1-settings.gebuehrenrate))}
+                    20%: {fmt(((parseFloat(item.etv)||0)*0.20+(parseFloat(item.wertansatz)||0)*settings.steuersatz)/(1-settings.gebuehrenrate))}
                   </span>
                   <span className="item-price p40">
-                    40%: {fmt((parseFloat(item.wertansatz)||0)*(1+settings.steuersatz+0.40)/(1-settings.gebuehrenrate))}
+                    40%: {fmt(((parseFloat(item.etv)||0)*0.40+(parseFloat(item.wertansatz)||0)*settings.steuersatz)/(1-settings.gebuehrenrate))}
                   </span>
                 </div>
               )}
