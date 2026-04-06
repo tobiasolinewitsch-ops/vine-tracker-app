@@ -390,6 +390,7 @@ export default function App() {
         {view==='items' && (
           <ItemList
             items={filteredItems}
+            settings={settings}
             search={search} setSearch={setSearch}
             statusFilter={statusFilter} setStatusFilter={setStatusFilter}
             selectedMonth={selectedMonth} setSelectedMonth={setSelectedMonth}
@@ -643,7 +644,7 @@ function Dashboard({totals,monthlyData,settings,onMonthClick,onSellableClick,onS
 }
 
 // ─── Item List ───
-function ItemList({items,search,setSearch,statusFilter,setStatusFilter,selectedMonth,setSelectedMonth,sellableFilter,setSellableFilter,onEdit}) {
+function ItemList({items,settings,search,setSearch,statusFilter,setStatusFilter,selectedMonth,setSelectedMonth,sellableFilter,setSellableFilter,onEdit}) {
   return (
     <div className="view-stack">
       {/* Search */}
@@ -700,6 +701,17 @@ function ItemList({items,search,setSearch,statusFilter,setStatusFilter,selectedM
                   <p className="item-wa">{fmt(item.wertansatz)}</p>
                 </div>
               </div>
+              {item.status === 'aktiv' && (parseFloat(item.wertansatz)||0) > 0 && (
+                <div className="item-prices">
+                  <span className="item-price-label">VK:</span>
+                  <span className="item-price p20">
+                    20%: {fmt((parseFloat(item.wertansatz)||0)*(1+settings.steuersatz+0.20)/(1-settings.gebuehrenrate))}
+                  </span>
+                  <span className="item-price p40">
+                    40%: {fmt((parseFloat(item.wertansatz)||0)*(1+settings.steuersatz+0.40)/(1-settings.gebuehrenrate))}
+                  </span>
+                </div>
+              )}
               <div className="item-tags">
                 <span className="tag" style={{'--tag-color':STATUS_COLORS[item.status]}}>
                   {STATUS_ICONS[item.status]} {STATUS_LABELS[item.status]||item.status}
